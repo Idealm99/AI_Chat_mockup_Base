@@ -1,0 +1,50 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mocking-flowise-api
+    ports:
+      - "6666:6666"
+    environment:
+      - GENOS_URL=${GENOS_URL}
+      - SERVING_ID=${SERVING_ID}
+      - GENOS_TOKEN=${GENOS_TOKEN}
+      - DEFAULT_MODEL=${DEFAULT_MODEL}
+      - REDIS_URL=redis://redis:6379/0
+      - PORT=6666
+    depends_on:
+      - redis
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./web-gpt-mate
+      dockerfile: Dockerfile
+    container_name: mocking-flowise-frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: mocking-flowise-redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    networks:
+      - app-network
+    restart: unless-stopped
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  redis-data: 
