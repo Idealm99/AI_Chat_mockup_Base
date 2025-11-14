@@ -43,11 +43,13 @@
 ```env
 OPENAI_API_KEY=your_openai_api_key
 OPENAI_MODEL=gpt-4o
+TAVILY_API_KEY = your_tavily_api_key
 ```
 
 **환경 변수 설명:**
 - `OPENAI_API_KEY`: OpenAI API 키 (필수)
 - `OPENAI_MODEL`: 사용할 OpenAI 모델 (선택, 기본값: gpt-4o)
+- `TAVILY_API_KEY` : 검색 도구 (필수)
 
 ### 실행 방법
 
@@ -91,7 +93,7 @@ OPENAI_MODEL=gpt-4o
 ### 서비스 구성
 
 - **frontend**: React + Vite + Nginx (포트 8080)
-- **api**: FastAPI + LangChain (포트 6666)
+- **api**: FastAPI + LangChain + LangGraph(포트 6666)
 - **redis**: Redis 서버 (세션 저장용)
 
 ### 저장 위치
