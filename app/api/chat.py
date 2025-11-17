@@ -348,6 +348,25 @@ async def chat_langgraph(
             if final_answer.strip():
                 await history_store.save_message(chat_id, "assistant", final_answer)
 
+            document_results = final_state.get("document_results") or []
+
+            def _format_reference(item: dict, max_length: int = 240):
+                if not isinstance(item, dict):
+                    return None
+                content = (item.get("content") or "").strip()
+                if max_length > 0 and len(content) > max_length:
+                    content = content[:max_length].rstrip() + "…"
+                return {
+                    "file_name": item.get("file_name") or "알 수 없는 문서",
+                    "page": item.get("page"),
+                    "position": item.get("position"),
+                    "content_snippet": content,
+                }
+
+            references_payload = [ref for ref in ( _format_reference(item) for item in document_results ) if ref]
+
+            await emit("document_references", {"documents": references_payload})
+
             await emit("metadata", {
                 "chat_id": chat_id,
                 "user_id": user_id,

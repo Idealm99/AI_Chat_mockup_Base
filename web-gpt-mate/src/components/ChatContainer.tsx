@@ -60,6 +60,7 @@ const ChatContainer = ({ messages, isLoading }: ChatContainerProps) => {
                 timestamp={message.timestamp}
                 reasoningSteps={message.reasoningSteps}
                 isThinking={message.isThinking}
+                references={message.references}
               />
             ))}
           </div>
