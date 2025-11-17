@@ -15,4 +15,4 @@ langchain-community>=0.2.0
 langgraph>=0.1.7
 httpx>=0.24.0
 weaviate-client>=3.5.0
-weaviate>=4.3.0
+weaviate
