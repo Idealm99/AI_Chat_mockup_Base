@@ -6,7 +6,7 @@ import { AppSidebar, Conversation } from "@/components/AppSidebar";
 import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { useToast } from "@/hooks/use-toast";
 import { streamLangGraphChat, getChatHistory, deleteChatHistory } from "@/lib/api";
-import { Message, ReasoningStep } from "@/types/chat";
+import { DocumentReference, Message, ReasoningStep } from "@/types/chat";
 
 const Index = () => {
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -56,6 +56,7 @@ const Index = () => {
           timestamp: new Date(),
           reasoningSteps: [],
           isThinking: false,
+          references: [],
         }));
         setMessages(loadedMessages);
       } else {
@@ -139,6 +140,7 @@ const Index = () => {
       text,
       isUser: true,
       timestamp: new Date(),
+      references: [],
     };
 
     setMessages((prev) => [...prev, userMessage]);
@@ -162,6 +164,7 @@ const Index = () => {
       timestamp: new Date(),
       reasoningSteps: [],
       isThinking: true,
+      references: [],
     };
     setMessages((prev) => [...prev, aiMessage]);
 
@@ -225,6 +228,24 @@ const Index = () => {
           );
         } else if (event.event === "metadata") {
           console.debug("LangGraph metadata", event.data);
+        } else if (event.event === "document_references") {
+          const docs = Array.isArray(event.data?.documents) ? event.data.documents : [];
+          const normalized: DocumentReference[] = docs.map((doc: any, idx: number) => ({
+            fileName: doc.file_name ?? doc.fileName ?? `문서 ${idx + 1}`,
+            page: doc.page ?? doc.page_number ?? null,
+            position: doc.position ?? null,
+            contentSnippet: doc.content_snippet ?? doc.contentSnippet ?? "",
+          }));
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === aiMessageId
+                ? {
+                    ...msg,
+                    references: normalized,
+                  }
+                : msg
+            )
+          );
         } else if (event.event === "error") {
           // 에러 처리
           const errorText = event.data || "알 수 없는 오류가 발생했습니다.";

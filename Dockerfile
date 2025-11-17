@@ -13,6 +13,6 @@ COPY . .
 
 EXPOSE 6666
 
-ENV PORT=6666
+ENV PORT=6666 
 
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-6666}"]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TypedDict
 
 from langgraph.graph import StateGraph, END
@@ -15,6 +16,7 @@ from app.utils import (
     ToolState,
 )
 from app.tools.web_search import web_search
+from app.tools.RAG import vectordb
 
 log = get_logger(__name__)
 
@@ -28,6 +30,7 @@ class GraphState(TypedDict):
     search_results_summary: List[str]
     current_search_query: str | None
     final_answer: str | None
+    document_results: List[Dict[str, Any]]
 
 
 Emitter = Callable[[str, Any], Awaitable[None]]
@@ -46,6 +49,7 @@ class LangGraphSearchAgent:
         self._client = _get_openai_client()
         self._graph = self._build_graph()
         self._emitter: Optional[Emitter] = emitter
+        self._vectordb: Optional[vectordb] = None
 
     def set_emitter(self, emitter: Optional[Emitter]) -> None:
         self._emitter = emitter
@@ -66,6 +70,8 @@ class LangGraphSearchAgent:
         graph.add_node("query_refinement", self._query_refinement_node)
         graph.add_node("search_and_summarize", self._search_and_summarize_node)
         graph.add_node("final_answer", self._final_answer_node)
+        graph.add_node("document_lookup", self._document_lookup_node)
+        graph.add_node("document_answer", self._document_answer_node)
 
         graph.set_entry_point("router")
 
@@ -75,10 +81,12 @@ class LangGraphSearchAgent:
             {
                 "general": "direct_answer",
                 "search": "query_refinement",
+                "document": "document_lookup",
             },
         )
 
         graph.add_edge("query_refinement", "search_and_summarize")
+        graph.add_edge("document_lookup", "document_answer")
 
         graph.add_conditional_edges(
             "search_and_summarize",
@@ -99,6 +107,11 @@ class LangGraphSearchAgent:
             lambda _: END,
         )
 
+        graph.add_conditional_edges(
+            "document_answer",
+            lambda _: END,
+        )
+
         return graph.compile()
 
     async def _router_node(self, state: GraphState) -> GraphState:
@@ -115,19 +128,28 @@ class LangGraphSearchAgent:
     async def _route_decision(self, state: GraphState) -> str:
         question = state["original_question"]
         prompt = (
-            "당신은 사용자의 질문을 분석하여 웹 검색이 필요한지 판단합니다.\n"
-            "경미한 인사나 단순 사실 복습이라면 'general'을,\n"
-            "최신 정보나 외부 지식이 필요하면 'search'를 출력하세요.\n"
-            "출력은 general 또는 search 중 하나만 가능하며 다른 단어는 포함하지 마세요."
+            "다음 사용자 질문에 대해 응답 방식을 결정하세요.\n"
+            "- 친근한 인사나 일반 정보로 충분하면 'general'\n"
+            "- 최신 뉴스나 웹 정보가 필요하면 'search'\n"
+            "- 사내 문서, 매뉴얼, 보고서 등 내부 자료에서 찾아야 하면 'document'\n"
+            "위 셋 중 하나만 소문자로 출력하고 설명을 덧붙이지 마세요."
         )
 
         decision = await self._simple_llm_call(prompt, question)
-        normalized = "search" if "search" in decision.lower() else "general"
+        import difflib
+        candidates = ["general", "search", "document"]
+        lowered = decision.lower().strip()
+        best_match = difflib.get_close_matches(lowered, candidates, n=1, cutoff=0.5)
+        normalized = best_match[0] if best_match else "general"
         await self._emit(
             "reasoning",
             {
                 "stage": "router",
-                "message": f"판단 결과: { '검색 필요' if normalized == 'search' else '일반 대화' }",
+                "message": "판단 결과: "
+                + (
+                    "문서 검색" if normalized == "document"
+                    else "검색 필요" if normalized == "search" else "일반 대화"
+                ),
             },
         )
         return normalized
@@ -223,6 +245,112 @@ class LangGraphSearchAgent:
 
     async def _search_loop_condition(self, state: GraphState) -> str:
         return "continue" if state["search_iterations"] < 2 else "done"
+
+    async def _document_lookup_node(self, state: GraphState) -> GraphState:
+        query = state["original_question"]
+        await self._emit(
+            "reasoning",
+            {
+                "stage": "document_lookup",
+                "message": "문서 벡터 DB에서 관련 정보를 검색합니다.",
+                "query": query,
+            },
+        )
+
+        try:
+            results = await self._document_search(query)
+        except Exception as exc:
+            log.exception("Document search failed", extra={"query": query})
+            await self._emit(
+                "reasoning",
+                {
+                    "stage": "document_lookup",
+                    "message": f"문서 검색 중 오류 발생: {exc}",
+                },
+            )
+            results = []
+
+        state["document_results"] = results
+
+        await self._emit(
+            "reasoning",
+            {
+                "stage": "document_lookup",
+                "message": (
+                    "문서 검색 결과 없음" if not results else f"문서 {len(results)}건 확보"
+                ),
+                "results": results,
+            },
+        )
+
+        return state
+
+    async def _document_answer_node(self, state: GraphState) -> GraphState:
+        documents = state.get("document_results", [])
+
+        if not documents:
+            await self._emit(
+                "reasoning",
+                {
+                    "stage": "document_answer",
+                    "message": "문서 검색 결과가 없어 일반 답변으로 전환합니다.",
+                },
+            )
+            return await self._direct_answer_node(state)
+
+        context_blocks = []
+        for item in documents:
+            file_name = item.get("file_name") or "알 수 없는 문서"
+            page = item.get("page")
+            position = item.get("position")
+            location = ", ".join(
+                str(part)
+                for part in [
+                    f"페이지 {page}" if page is not None else None,
+                    f"위치 {position}" if position is not None else None,
+                ]
+                if part
+            )
+            content = item.get("content") or ""
+            block = (
+                f"문서: {file_name}{' (' + location + ')' if location else ''}\n"
+                f"내용: {content}"
+            )
+            context_blocks.append(block)
+
+        context = "\n\n".join(context_blocks)
+        user_question = state["original_question"]
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "다음은 사내 또는 내부 문서에서 추출한 관련 내용입니다. "
+                    "제공된 문맥을 기반으로 질문에 구체적으로 답변하세요. "
+                    "문서명을 언급하고, 확실하지 않은 경우 솔직하게 말하세요."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"질문: {user_question}\n\n"
+                    f"활용 가능한 문서 조각:\n{context}"
+                ),
+            },
+        ]
+
+        await self._emit(
+            "reasoning",
+            {
+                "stage": "document_answer",
+                "message": "문서 맥락을 기반으로 답변을 생성합니다.",
+            },
+        )
+
+        final_message = await self._stream_answer(messages)
+        state["messages"].append(final_message)
+        state["final_answer"] = final_message.get("content", "")
+        return state
 
     async def _direct_answer_node(self, state: GraphState) -> GraphState:
         last_messages = state["messages"]
@@ -324,6 +452,7 @@ class LangGraphSearchAgent:
             "search_results_summary": [],
             "current_search_query": None,
             "final_answer": None,
+            "document_results": [],
         }
 
         result_state: GraphState = await self._graph.ainvoke(initial_state)
@@ -338,3 +467,44 @@ class LangGraphSearchAgent:
             ).read_text(encoding="utf-8")
         except Exception:
             return "You are a helpful AI assistant."
+
+    async def _document_search(self, query: str) -> List[Dict[str, Any]]:
+        db = await self._get_vectordb()
+        if db is None:
+            return []
+        return await asyncio.to_thread(db.hybrid_search, query)
+
+    async def _get_vectordb(self) -> Optional[vectordb]:
+        if self._vectordb is not None:
+            return self._vectordb
+
+        idx = os.getenv("WEAVIATE_INDEX")
+        host = os.getenv("WEAVIATE_HOST", "localhost")
+        http_port = int(os.getenv("WEAVIATE_HTTP_PORT", "8080"))
+        grpc_port = int(os.getenv("WEAVIATE_GRPC_PORT", "50051"))
+        serving_id = int(os.getenv("EMBEDDING_SERVING_ID", "10"))
+        token = os.getenv("EMBEDDING_BEARER_TOKEN", "")
+        base_url = os.getenv("EMBEDDING_BASE_URL", "https://genos.mnc.ai:3443")
+
+        if not idx or not token:
+            log.warning(
+                "Vectordb 환경 변수가 설정되지 않아 문서 검색을 비활성화합니다.",
+                extra={"idx": idx, "has_token": bool(token)},
+            )
+            return None
+
+        try:
+            self._vectordb = vectordb(
+                genos_ip=host,
+                http_port=http_port,
+                grpc_port=grpc_port,
+                idx=idx,
+                embedding_serving_id=serving_id,
+                embedding_bearer_token=token,
+                embedding_genos_url=base_url,
+            )
+        except Exception:
+            log.exception("Failed to initialize vectordb")
+            self._vectordb = None
+
+        return self._vectordb

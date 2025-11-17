@@ -4,7 +4,7 @@ import { Bot, ChevronDown, Loader2, Sparkles, User } from "lucide-react";
 import MarkdownRenderer from "./MarkdownRenderer";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import type { ReasoningStep } from "@/types/chat";
+import type { ReasoningStep, DocumentReference } from "@/types/chat";
 
 interface ChatMessageProps {
   message: string;
@@ -12,6 +12,7 @@ interface ChatMessageProps {
   timestamp?: Date;
   reasoningSteps?: ReasoningStep[];
   isThinking?: boolean;
+  references?: DocumentReference[];
 }
 
 const stageLabels: Record<string, string> = {
@@ -22,8 +23,9 @@ const stageLabels: Record<string, string> = {
   final: "최종 응답",
 };
 
-const ChatMessage = ({ message, isUser, timestamp, reasoningSteps = [], isThinking = false }: ChatMessageProps) => {
+const ChatMessage = ({ message, isUser, timestamp, reasoningSteps = [], isThinking = false, references = [] }: ChatMessageProps) => {
   const [open, setOpen] = useState(false);
+  const [referenceOpenState, setReferenceOpenState] = useState<Record<number, boolean>>({});
   const hasReasoning = reasoningSteps.length > 0;
   const showToggle = !isUser && (isThinking || hasReasoning);
 
@@ -31,6 +33,13 @@ const ChatMessage = ({ message, isUser, timestamp, reasoningSteps = [], isThinki
     () => [...reasoningSteps].sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime()),
     [reasoningSteps]
   );
+
+  const toggleReference = (idx: number) => {
+    setReferenceOpenState((prev) => ({
+      ...prev,
+      [idx]: !prev[idx],
+    }));
+  };
 
   return (
     <div
@@ -71,6 +80,70 @@ const ChatMessage = ({ message, isUser, timestamp, reasoningSteps = [], isThinki
             <MarkdownRenderer content={message} />
           )}
         </div>
+
+        {!isUser && references.length > 0 && (
+          <div className="mt-3 rounded-xl border bg-background/70 text-sm shadow-sm">
+            <div className="flex items-center gap-2 border-b px-4 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              참조 문서
+            </div>
+            <div className="divide-y">
+              {references.map((ref, idx) => {
+                const pageInfo = ref.page != null && ref.page !== ""
+                  ? ref.page
+                  : null;
+                const positionInfo = ref.position != null && ref.position !== ""
+                  ? ref.position
+                  : null;
+                const hasSnippet = Boolean(ref.contentSnippet);
+                const isExpanded = referenceOpenState[idx] ?? false;
+                return (
+                  <div key={`${ref.fileName}-${idx}`} className="px-4 py-3">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="flex-1 overflow-hidden space-y-1">
+                        <p className="truncate font-medium text-foreground">{ref.fileName || `문서 ${idx + 1}`}</p>
+                        <div className="flex flex-wrap gap-4 text-xs text-muted-foreground">
+                          <div className="flex items-center gap-1">
+                            <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/70">페이지</span>
+                            <span className="rounded border border-dashed px-2 py-0.5 text-[11px]">
+                              {pageInfo ?? "정보 없음"}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-1">
+                            <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/70">위치</span>
+                            <span className="rounded border border-dashed px-2 py-0.5 text-[11px]">
+                              {positionInfo ?? "정보 없음"}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                      {hasSnippet && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 px-3 text-xs font-semibold"
+                          onClick={() => toggleReference(idx)}
+                        >
+                          {isExpanded ? "접기" : "상세"}
+                          <ChevronDown
+                            className={cn(
+                              "ml-1 h-3 w-3 transition-transform",
+                              isExpanded ? "rotate-180" : "rotate-0",
+                            )}
+                          />
+                        </Button>
+                      )}
+                    </div>
+                    {isExpanded && hasSnippet && (
+                      <p className="mt-3 rounded-lg bg-muted/40 p-3 text-sm text-muted-foreground whitespace-pre-wrap">
+                        {ref.contentSnippet}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {showToggle && (
           <Collapsible open={open} onOpenChange={setOpen} className="pt-2">

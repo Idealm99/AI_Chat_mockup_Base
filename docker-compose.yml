@@ -6,13 +6,12 @@ services:
     container_name: mocking-flowise-api
     ports:
       - "6666:6666"
+    env_file:
+      - .env
     environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o}
       - REDIS_URL=redis://redis:6379/0
       - PORT=6666
       - DOCKER_ENV=1
-      - TAVILY_API_KEY=${TAVILY_API_KEY}
     volumes:
       - chat_data:/data
     depends_on:
