@@ -1,7 +1,9 @@
+
 from __future__ import annotations
 
 import asyncio
 import os
+from datetime import date
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TypedDict
 
 from langgraph.graph import StateGraph, END
@@ -18,6 +20,17 @@ from app.utils import (
 from app.tools.web_search import web_search
 from app.tools.RAG import vectordb
 
+try:
+    from app.mcp import (
+        get_mcp_tool_serving_id,
+        get_mcp_tools_schemas,
+        resolve_mcp_tool_name,
+    )
+except Exception:
+    get_mcp_tool_serving_id = None
+    get_mcp_tools_schemas = None
+    resolve_mcp_tool_name = None
+
 log = get_logger(__name__)
 
 
@@ -33,11 +46,31 @@ class GraphState(TypedDict):
     document_results: List[Dict[str, Any]]
 
 
+def _current_search_date() -> str:
+    return date.today().isoformat()
+
+
+def _append_search_date_to_query(query: str, search_date: str) -> str:
+    if not query:
+        return f"(검색일: {search_date})"
+    tag = f"(검색일: {search_date})"
+    if tag in query:
+        return query
+    return f"{query} {tag}"
+
+
 Emitter = Callable[[str, Any], Awaitable[None]]
 
 
 class LangGraphSearchAgent:
     """LangGraph-powered conversational search agent with streaming reasoning events."""
+
+    NODE_MCP_REQUIREMENTS = {
+        "search_and_summarize": {
+            "preferred_aliases": ["search-web", "search_web", "web_search"],
+            "contains_keywords": ["search"],
+        }
+    }
 
     def __init__(
         self,
@@ -50,6 +83,7 @@ class LangGraphSearchAgent:
         self._graph = self._build_graph()
         self._emitter: Optional[Emitter] = emitter
         self._vectordb: Optional[vectordb] = None
+        self._node_mcp_bindings = self._initialize_node_mcp_bindings()
 
     def set_emitter(self, emitter: Optional[Emitter]) -> None:
         self._emitter = emitter
@@ -158,21 +192,26 @@ class LangGraphSearchAgent:
         iteration = state["search_iterations"] + 1
         summaries_text = "\n".join(state["search_results_summary"]) or "없음"
 
+        search_date = _current_search_date()
         system_prompt = (
             "당신은 검색 질의 최적화 도우미입니다. 사용자의 질문과 지금까지의 검색 요약을 참고하여\n"
             "다음 검색을 위한 가장 유용한 단일 검색어를 만드세요.\n"
             "가능한 한 구체적으로 작성하며 한국어 사용자에게 적합한 언어를 선택하세요.\n"
+            f"오늘 날짜는 {search_date}입니다. 최신 정보가 필요하다면 날짜를 참고하세요.\n"
             "출력은 검색어 문장만 포함해야 합니다."
         )
 
         user_prompt = (
             f"사용자 질문: {state['original_question']}\n"
             f"이전 검색 요약: {summaries_text}\n"
+            f"현재 날짜: {search_date}\n"
             "다음 검색어를 제안하세요."
         )
 
         refined_query = await self._simple_llm_call(system_prompt, user_prompt, temperature=0.2)
         refined_query = refined_query.strip()
+        search_date = _current_search_date()
+        refined_query = _append_search_date_to_query(refined_query, search_date)
 
         await self._emit(
             "reasoning",
@@ -181,6 +220,7 @@ class LangGraphSearchAgent:
                 "iteration": iteration,
                 "message": f"검색어 생성 중: {refined_query}",
                 "query": refined_query,
+                "search_date": search_date,
             },
         )
 
@@ -197,6 +237,7 @@ class LangGraphSearchAgent:
                 "stage": "search",
                 "iteration": iteration,
                 "message": f"웹 검색 실행: {query}",
+                "mcp_binding": self._node_mcp_bindings.get("search_and_summarize"),
             },
         )
 
@@ -347,7 +388,10 @@ class LangGraphSearchAgent:
             },
         )
 
-        final_message = await self._stream_answer(messages)
+        final_message = await self._stream_answer(
+            messages,
+            tools=self._get_node_tool_schemas("final_answer"),
+        )
         state["messages"].append(final_message)
         state["final_answer"] = final_message.get("content", "")
         return state
@@ -408,9 +452,19 @@ class LangGraphSearchAgent:
         state["final_answer"] = final_message.get("content", "")
         return state
 
-    async def _stream_answer(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
+    async def _stream_answer(
+        self,
+        messages: List[Dict[str, str]],
+        *,
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
         final_message: Optional[Dict[str, Any]] = None
-        async for chunk in call_llm_stream(messages=messages, model=self.model, temperature=0.2):
+        async for chunk in call_llm_stream(
+            messages=messages,
+            model=self.model,
+            temperature=0.2,
+            tools=tools,
+        ):
             if isinstance(chunk, dict) and chunk.get("event") == "token":
                 await self._emit("token", chunk.get("data", ""))
             else:
@@ -435,6 +489,44 @@ class LangGraphSearchAgent:
             temperature=temperature,
         )
         return response.choices[0].message.content or ""
+
+    def _initialize_node_mcp_bindings(self) -> Dict[str, Dict[str, Any]]:
+        if resolve_mcp_tool_name is None:
+            return {}
+        bindings: Dict[str, Dict[str, Any]] = {}
+        for node_name, config in self.NODE_MCP_REQUIREMENTS.items():
+            tool_name = resolve_mcp_tool_name(
+                preferred_aliases=config.get("preferred_aliases"),
+                contains_keywords=config.get("contains_keywords"),
+            )
+            if not tool_name:
+                continue
+            serving_id = (
+                get_mcp_tool_serving_id(tool_name)
+                if get_mcp_tool_serving_id is not None
+                else None
+            )
+            bindings[node_name] = {
+                "tool_name": tool_name,
+                "serving_id": serving_id,
+            }
+            log.info(
+                "LangGraph node MCP binding configured",
+                extra={
+                    "node": node_name,
+                    "tool": tool_name,
+                    "serving_id": serving_id,
+                },
+            )
+        return bindings
+
+    def _get_node_tool_schemas(self, node_name: str) -> Optional[List[Dict[str, Any]]]:
+        if not self._node_mcp_bindings or get_mcp_tools_schemas is None:
+            return None
+        binding = self._node_mcp_bindings.get(node_name)
+        if not binding:
+            return None
+        return get_mcp_tools_schemas([binding["tool_name"]])
 
     async def run(
         self,
