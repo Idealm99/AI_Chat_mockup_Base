@@ -122,8 +122,10 @@ class vectordb:
     def _format_result(self, properties: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "file_name": self._extract_value(properties, ["file_name", "filename", "source"]),
-            "page": self._extract_value(properties, ["page", "page_number", "pageIndex", "page_idx"]),
-            "position": self._extract_value(properties, ["position", "offset", "chunk_index", "chunkId"]),
+            "file_path": self._extract_value(properties, ["file_path", "filepath", "path", "source_path"]),
+            "i_page": self._extract_value(properties, ["i_page", "page", "page_number", "pageIndex", "page_idx"]),
+            "page": self._extract_value(properties, ["page", "i_page", "pageIndex", "page_idx"]),
+            "position": self._extract_value(properties, ["file_path","position", "offset", "chunk_index", "chunkId"]),
             "content": self._extract_value(properties, ["content", "page_content", "text", "body"]),
         }
 

@@ -3,7 +3,7 @@ import os
 import aiohttp
 import requests
 
-from app.utils import States
+from app.utils import States, ToolState
 
 
 def get_tools_description(server_id: str):
@@ -78,15 +78,29 @@ def get_mcp_tool(tool_name: str):
             )
             response.raise_for_status()
             data = (await response.json())['data']
-            if tool_name == "generate_chart":
-                num_charts = len(states.tool_state.id_to_iframe)
-                states.tool_state.id_to_iframe[f"{num_charts}†chart"] = data[0]
-                if isinstance(tool_input.get('data_json'), str):
-                    data_json = json.loads(tool_input['data_json'])
+            normalized_name = tool_name.replace("-", "_")
+            if normalized_name == "web_search":
+                if "search_query" in tool_input or (data and isinstance(data[0], dict)):
+                    return data
+
+                tool_state = getattr(states, "tool_state", None)
+                if not isinstance(tool_state, ToolState):
+                    tool_state = ToolState()
+                    states.tool_state = tool_state
+
+                iframe_index = len(tool_state.id_to_iframe)
+                tool_state.id_to_iframe[f"{iframe_index}†chart"] = data[0]
+                raw_payload = tool_input.get('data_json')
+                if isinstance(raw_payload, str):
+                    data_json = json.loads(raw_payload)
                 else:
-                    data_json = tool_input['data_json']
-                return f"Chart '{data_json['title']}' has been successfully generated. You can display it to the user by using the following ID: `【{num_charts}†chart】`"                
-            
+                    data_json = raw_payload or {}
+                title = data_json.get('title', 'Generated chart')
+                return (
+                    f"Chart '{title}' has been successfully generated. "
+                    f"You can display it to the user by using the following ID: `【{iframe_index}†chart】`"
+                )
+
             return data
 
     return call_mcp_tool
