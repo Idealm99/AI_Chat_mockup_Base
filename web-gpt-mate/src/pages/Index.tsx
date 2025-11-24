@@ -9,6 +9,8 @@ import { streamLangGraphChat, getChatHistory, deleteChatHistory } from "@/lib/ap
 import { DocumentReference, Message, ReasoningStep } from "@/types/chat";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import KnowledgeGraphPanel from "@/components/KnowledgeGraphPanel";
+import ProteinStructurePanel from "@/components/ProteinStructurePanel";
 
 const Index = () => {
   const [searchParams] = useSearchParams();
@@ -401,6 +403,11 @@ const Index = () => {
     [messages],
   );
 
+  const hasCompletedAssistantResponse = useMemo(
+    () => messages.some((msg) => !msg.isUser && !msg.isThinking && (msg.text?.trim()?.length ?? 0) > 0),
+    [messages],
+  );
+
   const latestReasoning = latestAssistantMessage?.reasoningSteps ?? [];
   const latestReferences = latestAssistantMessage?.references ?? [];
   const streamingStatusLabel = isLoading
@@ -518,42 +525,9 @@ const Index = () => {
               </ul>
             </section>
 
-            <section className="rounded-2xl border border-cyan-500/20 bg-gradient-to-br from-slate-900/80 via-slate-950/60 to-slate-900/40 p-5 shadow-[0_20px_45px_-28px_rgba(6,182,212,0.45)]">
-              <span className="text-[11px] uppercase tracking-[0.28em] text-cyan-300/80">Knowledge Graph</span>
-              <div className="mt-4 space-y-3 text-sm text-slate-200/80">
-                <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Related Entities</p>
-                <div className="grid grid-cols-3 gap-2 text-xs">
-                  {[
-                    "KRAS",
-                    "PI3K",
-                    "EGFR",
-                    "MEK",
-                    "RAF",
-                    "ERK",
-                    "mTOR",
-                    "AKT",
-                    "STAT3",
-                  ].map((node) => (
-                    <div key={node} className="rounded-lg border border-slate-800/70 bg-slate-900/70 px-3 py-2 text-center text-slate-200/70">
-                      {node}
-                    </div>
-                  ))}
-                </div>
-                <p className="text-xs text-slate-500">
-                  실시간 그래프 뷰는 곧 제공됩니다. 현재는 가장 연관된 타겟 노드를 표시하고 있습니다.
-                </p>
-              </div>
-            </section>
+            <KnowledgeGraphPanel isActive={hasCompletedAssistantResponse} />
 
-            <section className="rounded-2xl border border-emerald-500/20 bg-slate-900/70 p-5 shadow-[0_20px_45px_-28px_rgba(16,185,129,0.35)]">
-              <span className="text-[11px] uppercase tracking-[0.28em] text-emerald-300/80">Protein Structure</span>
-              <div className="mt-4 rounded-2xl border border-dashed border-emerald-500/20 bg-emerald-500/5 p-6 text-center text-sm text-emerald-200/90">
-                3D 구조 미리보기는 곧 제공됩니다. 선택된 타겟의 AlphaFold 모델을 불러올 준비 중입니다.
-              </div>
-              <p className="mt-3 text-xs text-emerald-200/70">
-                고해상도 시각화 및 상호작용 기능이 추가될 예정이며, 현재는 해당 단백질의 구조 분석이 진행 중입니다.
-              </p>
-            </section>
+            <ProteinStructurePanel isActive={hasCompletedAssistantResponse} />
           </aside>
         </div>
       </div>
