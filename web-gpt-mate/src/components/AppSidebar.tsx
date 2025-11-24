@@ -1,4 +1,4 @@
-import { MessageSquarePlus, MessageSquare, Trash2, LogOut } from "lucide-react";
+import { MessageSquarePlus, MessageSquare, Trash2, LogOut, Home } from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
@@ -28,6 +28,7 @@ interface AppSidebarProps {
   onNewConversation: () => void;
   onDeleteConversation: (id: string) => void;
   onLogout?: () => void;
+  onNavigateHome: () => void;
 }
 
 export function AppSidebar({
@@ -37,29 +38,53 @@ export function AppSidebar({
   onNewConversation,
   onDeleteConversation,
   onLogout,
+  onNavigateHome,
 }: AppSidebarProps) {
   const { open } = useSidebar();
 
   return (
-    <Sidebar>
+    <Sidebar className="border-r border-slate-800/70 bg-slate-950/70 text-slate-200">
       <SidebarContent>
         <SidebarGroup>
           <div className="px-3 py-2">
             <Button
               onClick={onNewConversation}
-              className="w-full justify-start gap-2"
-              variant="outline"
+              className="w-full justify-start gap-2 rounded-xl border border-cyan-500/40 bg-cyan-500/10 text-cyan-100 transition hover:border-cyan-400 hover:bg-cyan-500/20"
+              variant="ghost"
             >
               <MessageSquarePlus className="h-4 w-4" />
               {open && <span>새 대화</span>}
             </Button>
           </div>
+        </SidebarGroup>
 
-          <SidebarGroupLabel>대화 목록</SidebarGroupLabel>
+        <SidebarGroup>
+          <SidebarGroupLabel className="text-[10px] uppercase tracking-[0.25em] text-slate-500">
+            사이트
+          </SidebarGroupLabel>
+          <SidebarGroupContent>
+            <SidebarMenu>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  onClick={onNavigateHome}
+                  className="w-full justify-start gap-3 rounded-xl border border-cyan-500/20 bg-slate-900/60 text-left text-slate-200 transition hover:-translate-y-0.5 hover:border-cyan-500/40 hover:bg-slate-900/80"
+                >
+                  <Home className="h-4 w-4 flex-shrink-0 text-cyan-300" />
+                  {open && <span className="text-sm font-medium">Command Center</span>}
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
+
+        <SidebarGroup>
+          <SidebarGroupLabel className="text-[10px] uppercase tracking-[0.25em] text-slate-500">
+            대화 목록
+          </SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
               {conversations.length === 0 ? (
-                <div className="px-3 py-8 text-center text-sm text-muted-foreground">
+                <div className="px-3 py-8 text-center text-xs text-slate-500/80">
                   {open ? "대화를 시작해보세요" : ""}
                 </div>
               ) : (
@@ -68,20 +93,20 @@ export function AppSidebar({
                     <SidebarMenuButton
                       onClick={() => onSelectConversation(conversation.id)}
                       className={cn(
-                        "group relative w-full justify-start",
+                        "group relative w-full justify-start rounded-xl border border-transparent bg-slate-900/60 text-left text-slate-200 transition-all hover:-translate-y-0.5 hover:border-cyan-500/30 hover:bg-slate-900/80",
                         currentConversationId === conversation.id &&
-                          "bg-muted text-primary font-medium"
+                          "border-cyan-500/40 bg-slate-900/90 text-cyan-100 shadow-[0_12px_30px_-18px_rgba(34,211,238,0.55)]",
                       )}
                     >
-                      <MessageSquare className="h-4 w-4 flex-shrink-0" />
+                      <MessageSquare className="h-4 w-4 flex-shrink-0 text-cyan-300" />
                       {open && (
                         <>
                           <div className="flex-1 overflow-hidden">
-                            <div className="truncate text-sm">
+                            <div className="truncate text-sm font-medium">
                               {conversation.title}
                             </div>
                             {conversation.lastMessage && (
-                              <div className="truncate text-xs text-muted-foreground">
+                              <div className="truncate text-xs text-slate-400">
                                 {conversation.lastMessage}
                               </div>
                             )}
@@ -89,7 +114,7 @@ export function AppSidebar({
                           <Button
                             variant="ghost"
                             size="icon"
-                            className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity"
+                            className="h-6 w-6 rounded-lg bg-slate-900/80 text-slate-400 opacity-0 transition-opacity group-hover:opacity-100 hover:text-red-400"
                             onClick={(e) => {
                               e.stopPropagation();
                               onDeleteConversation(conversation.id);
@@ -109,10 +134,10 @@ export function AppSidebar({
       </SidebarContent>
       {onLogout && (
         <SidebarFooter>
-          <div className="px-3 py-2">
+          <div className="px-3 py-3">
             <Button
               onClick={onLogout}
-              className="w-full justify-start gap-2"
+              className="w-full justify-start gap-2 rounded-xl border border-slate-800/80 bg-slate-900/80 text-slate-400 transition hover:border-red-400/50 hover:bg-red-500/10 hover:text-red-200"
               variant="ghost"
             >
               <LogOut className="h-4 w-4" />

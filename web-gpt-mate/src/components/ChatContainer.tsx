@@ -18,40 +18,39 @@ const ChatContainer = ({ messages, isLoading }: ChatContainerProps) => {
   }, [messages]);
 
   return (
-    <ScrollArea className="flex-1">
-      <div ref={scrollRef} className="max-w-4xl mx-auto">
+    <ScrollArea className="h-full">
+      <div ref={scrollRef} className="mx-auto flex h-full w-full max-w-5xl flex-col gap-6 pb-32">
         {isLoading && (
-          <div className="flex justify-center py-4">
-            <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-primary"></div>
+          <div className="flex justify-center pt-4">
+            <div className="h-10 w-10 animate-spin rounded-full border-2 border-cyan-400/40 border-t-cyan-200" />
           </div>
         )}
         {messages.length === 0 && !isLoading ? (
-          <div className="flex flex-col items-center justify-center h-full py-20 px-4">
-            <div className="text-center space-y-4">
-              <h1 className="text-4xl font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">
-                AI 채팅 어시스턴트
-              </h1>
-              <p className="text-muted-foreground text-lg">
-                무엇을 도와드릴까요?
+          <div className="flex flex-1 items-center justify-center">
+            <div className="w-full max-w-3xl rounded-3xl border border-dashed border-slate-700/70 bg-slate-900/60 p-10 text-center shadow-[0_45px_80px_-55px_rgba(6,182,212,0.55)]">
+              <h1 className="text-3xl font-semibold tracking-tight text-slate-100">JW Research AI Ready</h1>
+              <p className="mt-3 text-sm text-slate-400">
+                왼쪽 패널에서 새 대화를 시작하거나 아래 템플릿으로 연구 여정을 빠르게 열어보세요.
               </p>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-8 max-w-2xl">
-                <div className="p-4 rounded-lg bg-card border hover:border-primary transition-colors cursor-pointer">
-                  <p className="text-sm font-medium">💡 아이디어 브레인스토밍</p>
-                </div>
-                <div className="p-4 rounded-lg bg-card border hover:border-primary transition-colors cursor-pointer">
-                  <p className="text-sm font-medium">📝 글쓰기 도움</p>
-                </div>
-                <div className="p-4 rounded-lg bg-card border hover:border-primary transition-colors cursor-pointer">
-                  <p className="text-sm font-medium">🔍 정보 검색</p>
-                </div>
-                <div className="p-4 rounded-lg bg-card border hover:border-primary transition-colors cursor-pointer">
-                  <p className="text-sm font-medium">💻 코딩 지원</p>
-                </div>
+              <div className="mt-8 grid grid-cols-1 gap-3 text-left sm:grid-cols-2">
+                {[
+                  "신약 후보 물질 요약",
+                  "임상 데이터 비교 분석",
+                  "생물학적 경로 매핑",
+                  "독성 리스크 진단",
+                ].map((template) => (
+                  <div
+                    key={template}
+                    className="rounded-2xl border border-slate-800/70 bg-slate-900/70 px-5 py-4 text-sm text-slate-200 shadow-inner transition hover:border-cyan-400/30 hover:text-cyan-200"
+                  >
+                    {template}
+                  </div>
+                ))}
               </div>
             </div>
           </div>
         ) : (
-          <div className="space-y-0">
+          <div className="flex flex-col gap-6">
             {messages.map((message) => (
               <ChatMessage
                 key={message.id}

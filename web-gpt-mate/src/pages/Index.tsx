@@ -1,5 +1,5 @@
-import { useState, useRef, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useState, useRef, useEffect, useMemo } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import ChatContainer from "@/components/ChatContainer";
 import ChatInput from "@/components/ChatInput";
 import { AppSidebar, Conversation } from "@/components/AppSidebar";
@@ -7,8 +7,11 @@ import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { useToast } from "@/hooks/use-toast";
 import { streamLangGraphChat, getChatHistory, deleteChatHistory } from "@/lib/api";
 import { DocumentReference, Message, ReasoningStep } from "@/types/chat";
+import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
 
 const Index = () => {
+  const [searchParams] = useSearchParams();
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [currentConversationId, setCurrentConversationId] = useState<
     string | undefined
@@ -19,6 +22,19 @@ const Index = () => {
   const { toast } = useToast();
   const navigate = useNavigate();
   const abortControllerRef = useRef<AbortController | null>(null);
+  const hasPrefillParamsRef = useRef(
+    Boolean(searchParams.get("q") || searchParams.get("project"))
+  );
+  const lastPrefillKeyRef = useRef<string | null>(null);
+  const skipNextHistoryLoadRef = useRef(false);
+
+  const decodeParam = (value: string) => {
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value;
+    }
+  };
 
   const cancelOngoingStream = () => {
     if (abortControllerRef.current) {
@@ -28,16 +44,19 @@ const Index = () => {
     setIsLoading(false);
   };
 
-  // 컴포넌트 마운트 시 자동으로 새 대화 생성
   useEffect(() => {
-    if (conversations.length === 0 && !currentConversationId) {
+    if (conversations.length === 0 && !currentConversationId && !hasPrefillParamsRef.current) {
       handleNewConversation();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 대화 선택 시 히스토리 로드
   useEffect(() => {
     if (currentConversationId) {
+      if (skipNextHistoryLoadRef.current) {
+        skipNextHistoryLoadRef.current = false;
+        return;
+      }
       loadChatHistory(currentConversationId);
     }
   }, [currentConversationId]);
@@ -83,6 +102,7 @@ const Index = () => {
       timestamp: new Date(),
     };
     setConversations((prev) => [newConversation, ...prev]);
+    skipNextHistoryLoadRef.current = true;
     setCurrentConversationId(newConversation.id);
     setMessages([]);
   };
@@ -132,6 +152,7 @@ const Index = () => {
         timestamp: new Date(),
       };
       setConversations((prev) => [newConversation, ...prev]);
+      skipNextHistoryLoadRef.current = true;
       setCurrentConversationId(chatId);
     }
 
@@ -333,15 +354,64 @@ const Index = () => {
     }
   };
 
+  useEffect(() => {
+    const rawQuery = searchParams.get("q");
+    const rawProject = searchParams.get("project");
+    const decodedQuery = rawQuery ? decodeParam(rawQuery) : null;
+    const decodedProject = rawProject ? decodeParam(rawProject) : null;
+
+    const prefillKey = decodedQuery
+      ? `q:${decodedQuery}`
+      : decodedProject
+      ? `project:${decodedProject}`
+      : null;
+
+    if (!prefillKey || lastPrefillKeyRef.current === prefillKey) {
+      return;
+    }
+
+    lastPrefillKeyRef.current = prefillKey;
+
+    if (decodedQuery) {
+      void handleSendMessage(decodedQuery);
+    } else if (decodedProject) {
+      const prompt = `Show me the latest findings for project ${decodedProject}.`;
+      void handleSendMessage(prompt);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
   const handleLogout = () => {
     localStorage.removeItem("isAuthenticated");
     localStorage.removeItem("username");
     navigate("/login");
   };
 
+  const handleNavigateHome = () => {
+    navigate("/");
+  };
+
+  const activeConversation = useMemo(
+    () => conversations.find((conversation) => conversation.id === currentConversationId),
+    [conversations, currentConversationId],
+  );
+
+  const latestAssistantMessage = useMemo(
+    () => [...messages].reverse().find((message) => !message.isUser),
+    [messages],
+  );
+
+  const latestReasoning = latestAssistantMessage?.reasoningSteps ?? [];
+  const latestReferences = latestAssistantMessage?.references ?? [];
+  const streamingStatusLabel = isLoading
+    ? "Streaming"
+    : isLoadingHistory
+    ? "Loading history"
+    : "Idle";
+
   return (
-    <SidebarProvider>
-      <div className="flex min-h-screen w-full bg-chat-background">
+  <SidebarProvider className="command-center-theme bg-slate-950 text-slate-100">
+      <div className="flex min-h-screen w-full bg-slate-950 text-slate-100">
         <AppSidebar
           conversations={conversations}
           currentConversationId={currentConversationId}
@@ -349,20 +419,142 @@ const Index = () => {
           onNewConversation={handleNewConversation}
           onDeleteConversation={handleDeleteConversation}
           onLogout={handleLogout}
+          onNavigateHome={handleNavigateHome}
         />
 
-        <div className="flex flex-col flex-1">
-          <header className="border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-            <div className="flex items-center px-4 py-4 gap-3">
-              <SidebarTrigger />
-              <h1 className="text-xl font-semibold">AI Chat - Multi-turn</h1>
-              {isLoadingHistory && <span className="text-xs text-muted-foreground">로딩 중...</span>}
+        <div className="flex flex-1 flex-col lg:flex-row">
+          <div className="flex flex-1 flex-col border-x border-slate-800/70 bg-slate-950/60 backdrop-blur-xl">
+            <header className="border-b border-slate-800/60 bg-slate-900/60/80 backdrop-blur-lg">
+              <div className="flex flex-wrap items-center gap-4 px-6 py-4">
+                <SidebarTrigger className="text-slate-200 hover:text-white" />
+                <div className="space-y-0.5">
+                  <p className="text-xs uppercase tracking-[0.24em] text-cyan-300/70">JW MCP Command Center</p>
+                  <h1 className="text-xl font-semibold text-slate-50">Research Copilot Workspace</h1>
+                </div>
+                <div className="flex flex-1 items-center gap-2">
+                  {activeConversation && (
+                    <Badge variant="outline" className="border-cyan-500/40 bg-cyan-500/10 text-cyan-200">
+                      {activeConversation.title}
+                    </Badge>
+                  )}
+                  <Badge variant="outline" className="ml-auto border-slate-700/70 bg-slate-800 text-slate-200">
+                    {streamingStatusLabel}
+                  </Badge>
+                  {latestReferences.length > 0 && (
+                    <Badge variant="outline" className="border-emerald-500/40 bg-emerald-500/10 text-emerald-200">
+                      {latestReferences.length} Reference{latestReferences.length > 1 ? "s" : ""}
+                    </Badge>
+                  )}
+                </div>
+              </div>
+            </header>
+
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+              <div className="flex-1 overflow-hidden px-2 py-4 sm:px-6 lg:px-10">
+                <ChatContainer messages={messages} isLoading={isLoadingHistory} />
+              </div>
+              <div className="bg-slate-900/50 px-3 pb-8 pt-4 sm:px-6 lg:px-10">
+                <ChatInput onSendMessage={handleSendMessage} disabled={isLoading || isLoadingHistory} />
+              </div>
             </div>
-          </header>
+          </div>
 
-          <ChatContainer messages={messages} isLoading={isLoadingHistory} />
+          <aside className="hidden w-full max-w-sm flex-col gap-5 border-l border-slate-800/70 bg-slate-950/60 p-6 backdrop-blur-xl xl:flex">
+            <section className="rounded-2xl border border-slate-800/60 bg-slate-900/60 p-5">
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="text-[11px] uppercase tracking-[0.28em] text-cyan-300/80">Reasoning Process</span>
+                  <h3 className="mt-1 text-sm font-semibold text-slate-100">
+                    {activeConversation?.title ?? "현재 대화"}
+                  </h3>
+                </div>
+                <span className="text-xs text-slate-400">{latestReasoning.length} steps</span>
+              </div>
+              <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-800/80">
+                <div
+                  className={cn(
+                    "h-full rounded-full transition-all duration-700",
+                    isLoading ? "w-3/5 animate-pulse bg-cyan-400/80" : "w-full bg-emerald-400/80",
+                  )}
+                />
+              </div>
+              <ul className="mt-4 space-y-3 text-sm text-slate-300/80">
+                {latestReasoning.slice(-4).map((step) => (
+                  <li key={step.id} className="rounded-xl border border-slate-800/80 bg-slate-900/70 px-3 py-2">
+                    <p className="text-xs uppercase tracking-wide text-cyan-200/80">
+                      {step.stage}
+                    </p>
+                    <p className="mt-1 line-clamp-2 text-sm text-slate-200/90">{step.message}</p>
+                  </li>
+                ))}
+                {latestReasoning.length === 0 && (
+                  <li className="rounded-xl border border-dashed border-slate-800/70 bg-slate-900/50 px-3 py-4 text-center text-xs text-slate-500">
+                    아직 추론 정보가 수집되지 않았습니다.
+                  </li>
+                )}
+              </ul>
+            </section>
 
-          <ChatInput onSendMessage={handleSendMessage} disabled={isLoading || isLoadingHistory} />
+            <section className="rounded-2xl border border-slate-800/60 bg-slate-900/60 p-5">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] uppercase tracking-[0.28em] text-slate-500">References</span>
+                <span className="text-xs text-slate-400">{latestReferences.length}</span>
+              </div>
+              <ul className="mt-3 space-y-3 text-sm text-slate-300/80">
+                {latestReferences.slice(0, 4).map((ref, idx) => (
+                  <li key={`${ref.fileName}-${idx}`} className="rounded-xl border border-slate-800/80 bg-slate-900/70 px-3 py-3">
+                    <p className="truncate text-sm font-medium text-slate-100">{ref.fileName}</p>
+                    <div className="mt-1 flex items-center gap-3 text-xs text-slate-400">
+                      <span>Page {ref.page ?? "-"}</span>
+                      <span>Position {ref.position ?? "-"}</span>
+                    </div>
+                  </li>
+                ))}
+                {latestReferences.length === 0 && (
+                  <li className="rounded-xl border border-dashed border-slate-800/70 bg-slate-900/50 px-3 py-4 text-center text-xs text-slate-500">
+                    최신 응답에서 참조 문서가 발견되지 않았습니다.
+                  </li>
+                )}
+              </ul>
+            </section>
+
+            <section className="rounded-2xl border border-cyan-500/20 bg-gradient-to-br from-slate-900/80 via-slate-950/60 to-slate-900/40 p-5 shadow-[0_20px_45px_-28px_rgba(6,182,212,0.45)]">
+              <span className="text-[11px] uppercase tracking-[0.28em] text-cyan-300/80">Knowledge Graph</span>
+              <div className="mt-4 space-y-3 text-sm text-slate-200/80">
+                <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Related Entities</p>
+                <div className="grid grid-cols-3 gap-2 text-xs">
+                  {[
+                    "KRAS",
+                    "PI3K",
+                    "EGFR",
+                    "MEK",
+                    "RAF",
+                    "ERK",
+                    "mTOR",
+                    "AKT",
+                    "STAT3",
+                  ].map((node) => (
+                    <div key={node} className="rounded-lg border border-slate-800/70 bg-slate-900/70 px-3 py-2 text-center text-slate-200/70">
+                      {node}
+                    </div>
+                  ))}
+                </div>
+                <p className="text-xs text-slate-500">
+                  실시간 그래프 뷰는 곧 제공됩니다. 현재는 가장 연관된 타겟 노드를 표시하고 있습니다.
+                </p>
+              </div>
+            </section>
+
+            <section className="rounded-2xl border border-emerald-500/20 bg-slate-900/70 p-5 shadow-[0_20px_45px_-28px_rgba(16,185,129,0.35)]">
+              <span className="text-[11px] uppercase tracking-[0.28em] text-emerald-300/80">Protein Structure</span>
+              <div className="mt-4 rounded-2xl border border-dashed border-emerald-500/20 bg-emerald-500/5 p-6 text-center text-sm text-emerald-200/90">
+                3D 구조 미리보기는 곧 제공됩니다. 선택된 타겟의 AlphaFold 모델을 불러올 준비 중입니다.
+              </div>
+              <p className="mt-3 text-xs text-emerald-200/70">
+                고해상도 시각화 및 상호작용 기능이 추가될 예정이며, 현재는 해당 단백질의 구조 분석이 진행 중입니다.
+              </p>
+            </section>
+          </aside>
         </div>
       </div>
     </SidebarProvider>

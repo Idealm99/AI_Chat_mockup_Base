@@ -117,3 +117,113 @@ All colors MUST be HSL.
     @apply bg-background text-foreground;
   }
 }
+
+@layer base {
+  .command-center-theme {
+    --background: 222 47% 11%;
+    --foreground: 210 40% 98%;
+
+    --card: 222 47% 11%;
+    --card-foreground: 210 40% 98%;
+
+    --popover: 222 47% 11%;
+    --popover-foreground: 210 40% 98%;
+
+    --primary: 172 66% 50%;
+    --primary-foreground: 222 47% 11%;
+
+    --secondary: 217 33% 17%;
+    --secondary-foreground: 210 40% 98%;
+
+    --muted: 217 33% 17%;
+    --muted-foreground: 215 20% 65%;
+
+    --accent: 172 66% 50%;
+    --accent-foreground: 222 47% 11%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 217 33% 17%;
+    --input: 217 33% 17%;
+    --ring: 172 66% 50%;
+
+    --status-active: 158 64% 52%;
+    --status-warning: 38 92% 50%;
+    --status-inactive: 215 20% 65%;
+
+    --glass-bg: 222 47% 11% / 0.4;
+    --glass-border: 217 33% 25%;
+    --glow-cyan: 172 66% 50% / 0.3;
+    --glow-emerald: 158 64% 52% / 0.3;
+
+    --sidebar-background: 222 47% 8%;
+    --sidebar-foreground: 210 40% 98%;
+    --sidebar-primary: 172 66% 50%;
+    --sidebar-primary-foreground: 222 47% 11%;
+    --sidebar-accent: 217 33% 17%;
+    --sidebar-accent-foreground: 210 40% 98%;
+    --sidebar-border: 217 33% 17%;
+    --sidebar-ring: 172 66% 50%;
+  }
+}
+
+@layer utilities {
+  .glass-card {
+    @apply border border-white/10 bg-card/40 backdrop-blur-xl shadow-lg;
+  }
+
+  .glass-card-hover {
+    @apply glass-card transition-all duration-300 hover:border-primary/30 hover:bg-card/60;
+  }
+
+  .glow-cyan {
+    box-shadow: 0 0 20px hsl(var(--glow-cyan)), 0 0 40px hsl(var(--glow-cyan));
+  }
+
+  .glow-emerald {
+    box-shadow: 0 0 15px hsl(var(--glow-emerald));
+  }
+
+  .status-pulse {
+    animation: pulse-glow 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+
+  @keyframes pulse-glow {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.5;
+    }
+  }
+
+  .knowledge-graph-animate {
+    animation: rotate-slow 60s linear infinite;
+  }
+
+  @keyframes rotate-slow {
+    from {
+      transform: rotate(0deg);
+    }
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .fade-in {
+    animation: fadeIn 0.5s ease-in;
+  }
+
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+}
