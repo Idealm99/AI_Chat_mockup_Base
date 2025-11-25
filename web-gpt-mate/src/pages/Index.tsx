@@ -485,19 +485,20 @@ const Index = () => {
                   )}
                 />
               </div>
-              <ul className="mt-4 space-y-3 text-sm text-slate-300/80">
-                {latestReasoning.slice(-4).map((step) => (
-                  <li key={step.id} className="rounded-xl border border-slate-800/80 bg-slate-900/70 px-3 py-2">
-                    <p className="text-xs uppercase tracking-wide text-cyan-200/80">
-                      {step.stage}
-                    </p>
-                    <p className="mt-1 line-clamp-2 text-sm text-slate-200/90">{step.message}</p>
-                  </li>
-                ))}
-                {latestReasoning.length === 0 && (
+              <ul className="mt-4 space-y-3 text-sm text-slate-300/80 overflow-y-auto rounded-xl border border-slate-800/60 bg-slate-900/40 p-2 transition-all duration-200 dark:bg-slate-900/50 max-h-[26rem]">
+                {latestReasoning.length === 0 ? (
                   <li className="rounded-xl border border-dashed border-slate-800/70 bg-slate-900/50 px-3 py-4 text-center text-xs text-slate-500">
                     아직 추론 정보가 수집되지 않았습니다.
                   </li>
+                ) : (
+                  latestReasoning.map((step) => (
+                    <li key={step.id} className="rounded-xl border border-slate-800/80 bg-slate-900/70 px-3 py-2">
+                      <p className="text-xs uppercase tracking-wide text-cyan-200/80">
+                        {step.stage}
+                      </p>
+                      <p className="mt-1 text-sm text-slate-200/90">{step.message}</p>
+                    </li>
+                  ))
                 )}
               </ul>
             </section>
