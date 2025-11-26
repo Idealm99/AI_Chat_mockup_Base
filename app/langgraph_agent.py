@@ -2,13 +2,26 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from datetime import date
-from typing import Any, Awaitable, Callable, Dict, List, Optional, TypedDict
+from typing import Any, Awaitable, Callable, Dict, List, NotRequired, Optional, Tuple, TypedDict
+
+import re
 
 from langgraph.graph import StateGraph, END
+from langchain_core.messages import ToolMessage
+from langchain_core.tools import BaseTool
+
+try:
+    from langgraph.types import Command
+except ImportError:  # pragma: no cover - optional dependency
+    Command = None
 
 from app.logger import get_logger
+from app.mcp.mcp_adapter_client import MCPAdapterClient, ResolvedMCPTool
+from app.tools.web_search import web_search
+from app.tools.RAG import vectordb
 from app.utils import (
     ROOT_DIR,
     _get_default_model,
@@ -17,8 +30,6 @@ from app.utils import (
     States,
     ToolState,
 )
-from app.tools.web_search import web_search
-from app.tools.RAG import vectordb
 
 try:
     from app.mcp import (
@@ -44,6 +55,9 @@ class GraphState(TypedDict):
     current_search_query: str | None
     final_answer: str | None
     document_results: List[Dict[str, Any]]
+    mcp_tool_inputs: NotRequired[Dict[str, Dict[str, Any]]]
+    mcp_tool_results: NotRequired[Dict[str, Any]]
+    workflow_trace: NotRequired[List[Dict[str, Any]]]
 
 
 def _current_search_date() -> str:
@@ -52,8 +66,8 @@ def _current_search_date() -> str:
 
 def _append_search_date_to_query(query: str, search_date: str) -> str:
     if not query:
-        return f"(검색일: {search_date})"
-    tag = f"(검색일: {search_date})"
+        return f"(Search date: {search_date})"
+    tag = f"(Search date: {search_date})"
     if tag in query:
         return query
     return f"{query} {tag}"
@@ -65,12 +79,53 @@ Emitter = Callable[[str, Any], Awaitable[None]]
 class LangGraphSearchAgent:
     """LangGraph-powered conversational search agent with streaming reasoning events."""
 
+    MAX_STAGE_AGENT_STEPS = 4
+
     NODE_MCP_REQUIREMENTS = {
-        "search_and_summarize": {
-            "preferred_aliases": ["search-web", "search_web", "web_search"],
-            "contains_keywords": ["search"],
+        "mcp_combined": {
+            "preferred_aliases": ["alphafold", "pdb", "alphafold-server", "pdb-server","AlphaFold-MCP-Server","PDB-MCP-Server"],
+            "contains_keywords": ["alphafold", "pdb", "structure", "protein"],
         }
     }
+
+    WORKFLOW_DEFINITION: Tuple[Dict[str, Any], ...] = (
+        {
+            "key": "target_agent",
+            "title": "TargetAgent",
+            "description": "Select core gene targets associated with the disease.",
+            "tool_names": ("OpenTargets-MCP-Server",),
+        },
+        {
+            "key": "omics_agent",
+            "title": "OmicsAgent",
+            "description": "Validate the mutations and expression patterns of the selected targets using multi-omics data.",
+            "tool_names": ("PubChem-MCP-Server", "ChEMBL-MCP-Server"),
+        },
+        {
+            "key": "pathway_agent",
+            "title": "PathwayAgent",
+            "description": "Map the associated signaling pathways and biological functions.",
+            "tool_names": ("KEGG-MCP-Server", "Reactome-MCP-Server", "GeneOntology-MCP-Server"),
+        },
+        {
+            "key": "chem_agent",
+            "title": "ChemAgent",
+            "description": "Collect compounds acting on the pathway together with their activity data.",
+            "tool_names": ("PubChem-MCP-Server", "ChEMBL-MCP-Server"),
+        },
+        {
+            "key": "structure_agent",
+            "title": "StructureAgent",
+            "description": "Predict binding pockets and affinities from 3D structural information.",
+            "tool_names": ("AlphaFold-MCP-Server", "PDB-MCP-Server"),
+        },
+        {
+            "key": "clinical_agent",
+            "title": "ClinicalAgent",
+            "description": "Review clinical-trial and regulatory datasets.",
+            "tool_names": ("ClinicalTrials-MCP-Server", "OpenFDA-MCP-Server"),
+        },
+    )
 
     def __init__(
         self,
@@ -80,6 +135,8 @@ class LangGraphSearchAgent:
     ) -> None:
         self.model = model or _get_default_model()
         self._client = _get_openai_client()
+        self._mcp_adapter = MCPAdapterClient()
+        self._workflow_stage_configs = self._compile_workflow_stages()
         self._graph = self._build_graph()
         self._emitter: Optional[Emitter] = emitter
         self._vectordb: Optional[vectordb] = None
@@ -98,303 +155,348 @@ class LangGraphSearchAgent:
 
     def _build_graph(self):
         graph = StateGraph(GraphState)
-
         graph.add_node("router", self._router_node)
-        graph.add_node("direct_answer", self._direct_answer_node)
-        graph.add_node("query_refinement", self._query_refinement_node)
-        graph.add_node("search_and_summarize", self._search_and_summarize_node)
+        previous_node = "router"
+        for stage in self._workflow_stage_configs:
+            node_name = stage["key"]
+            graph.add_node(node_name, self._make_workflow_stage_node(stage))
+            graph.add_edge(previous_node, node_name)
+            previous_node = node_name
+
         graph.add_node("final_answer", self._final_answer_node)
-        graph.add_node("document_lookup", self._document_lookup_node)
-        graph.add_node("document_answer", self._document_answer_node)
 
         graph.set_entry_point("router")
 
-        graph.add_conditional_edges(
-            "router",
-            self._route_decision,
-            {
-                "general": "direct_answer",
-                "search": "query_refinement",
-                "document": "document_lookup",
-            },
-        )
-
-        graph.add_edge("query_refinement", "search_and_summarize")
-        graph.add_edge("document_lookup", "document_answer")
-
-        graph.add_conditional_edges(
-            "search_and_summarize",
-            self._search_loop_condition,
-            {
-                "continue": "query_refinement",
-                "done": "final_answer",
-            },
-        )
-
-        graph.add_conditional_edges(
-            "direct_answer",
-            lambda _: END,
-        )
+        graph.add_edge(previous_node, "final_answer")
 
         graph.add_conditional_edges(
             "final_answer",
             lambda _: END,
         )
 
-        graph.add_conditional_edges(
-            "document_answer",
-            lambda _: END,
-        )
-
         return graph.compile()
 
+    def _compile_workflow_stages(self) -> List[Dict[str, Any]]:
+        compiled: List[Dict[str, Any]] = []
+        available_servers = set(self._mcp_adapter.available_servers())
+        for blueprint in self.WORKFLOW_DEFINITION:
+            requested_names: Tuple[str, ...] = blueprint.get("tool_names", tuple())
+            missing_names = [name for name in requested_names if name not in available_servers]
+            module_tools = [name for name in requested_names if name in available_servers]
+            compiled_stage = {
+                **blueprint,
+                "module_tools": tuple(module_tools),
+                "missing_tools": tuple(missing_names),
+            }
+            if missing_names:
+                log.warning(
+                    "Stage references unavailable MCP servers",
+                    extra={
+                        "stage": blueprint.get("title"),
+                        "missing_tools": missing_names,
+                    },
+                )
+            compiled.append(compiled_stage)
+        return compiled
+
+    def _make_workflow_stage_node(
+        self, stage_config: Dict[str, Any]
+    ) -> Callable[[GraphState], Awaitable[GraphState]]:
+        stage_key = stage_config.get("key", "stage")
+        stage_title = stage_config.get("title", stage_key)
+        stage_description = stage_config.get("description", "")
+        stage_servers: Tuple[str, ...] = stage_config.get("module_tools", tuple())
+        missing_servers: Tuple[str, ...] = stage_config.get("missing_tools", tuple())
+
+        async def _node(state: GraphState) -> GraphState:
+            query = state.get("current_search_query") or state["original_question"]
+
+            await self._emit(
+                "reasoning",
+                {
+                    "stage": stage_key,
+                    "message": f"Running {stage_title}: {stage_description}",
+                    "query": query,
+                    "tools": list(stage_servers),
+                },
+            )
+
+            workflow_results = state.setdefault("mcp_tool_results", {})
+            stage_results: Dict[str, Any] = {}
+            workflow_results[stage_title] = stage_results
+
+            workflow_trace = state.setdefault("workflow_trace", [])
+            notes = (
+                f"Missing MCP servers: {', '.join(missing_servers)}"
+                if missing_servers
+                else ""
+            )
+            trace_entry = {
+                "stage": stage_title,
+                "goal": stage_description,
+                "tools": [],
+                "status": "pending",
+                "notes": notes,
+            }
+
+            if not stage_servers:
+                trace_entry["status"] = "skipped"
+                trace_entry["notes"] = "Skipping stage because no registered MCP server tools are available."
+                workflow_trace.append(trace_entry)
+                await self._emit(
+                    "reasoning",
+                    {
+                        "stage": stage_key,
+                        "message": f"Skipping {stage_title}. No MCP tools are available.",
+                    },
+                )
+                return state
+
+            resolved_tools: List[ResolvedMCPTool] = await self._mcp_adapter.get_stage_tools(stage_servers)
+            if not resolved_tools:
+                trace_entry["status"] = "skipped"
+                trace_entry["notes"] = (
+                    trace_entry.get("notes", "")
+                    + ("; " if trace_entry.get("notes") else "")
+                    + "No LangChain tools were found on the selected MCP servers."
+                )
+                workflow_trace.append(trace_entry)
+                await self._emit(
+                    "reasoning",
+                    {
+                        "stage": stage_key,
+                        "message": f"Skipping {stage_title}. No converted MCP tools are available.",
+                    },
+                )
+                return state
+
+            agent_outcome = await self._run_stage_agent(
+                stage_key=stage_key,
+                stage_title=stage_title,
+                stage_description=stage_description,
+                query=query,
+                resolved_tools=resolved_tools,
+            )
+
+            stage_results.update(agent_outcome["results"])
+            trace_entry["tools"].extend(agent_outcome["used_tools"])
+            trace_entry["status"] = agent_outcome["status"]
+            trace_entry["notes"] = agent_outcome["notes"]
+            workflow_trace.append(trace_entry)
+
+            await self._emit(
+                "reasoning",
+                {
+                    "stage": stage_key,
+                    "message": agent_outcome["emit_message"],
+                    "results": list(stage_results.keys()),
+                },
+            )
+
+            return state
+
+        return _node
+
+    async def _run_stage_agent(
+        self,
+        *,
+        stage_key: str,
+        stage_title: str,
+        stage_description: str,
+        query: str,
+        resolved_tools: List[ResolvedMCPTool],
+    ) -> Dict[str, Any]:
+        tool_map: Dict[str, ResolvedMCPTool] = {
+            resolved.tool.name: resolved for resolved in resolved_tools
+        }
+        scratchpad: List[Dict[str, Any]] = []
+        stage_results: Dict[str, Any] = {}
+        used_tools: List[str] = []
+        summary = ""
+
+        for step in range(self.MAX_STAGE_AGENT_STEPS):
+            agent_instruction = self._build_stage_agent_prompt(
+                stage_title=stage_title,
+                stage_description=stage_description,
+                query=query,
+                resolved_tools=resolved_tools,
+                scratchpad=scratchpad,
+            )
+
+            response_text = await self._simple_llm_call(
+                system_prompt=(
+                    f"You are the specialist agent for the {stage_title} stage. "
+                    "Respond only with JSON that describes your next action."
+                ),
+                user_prompt=agent_instruction,
+            )
+
+            try:
+                decision = json.loads(response_text)
+            except json.JSONDecodeError:
+                decision = {"action": "finish", "summary": response_text.strip()}
+
+            action = (decision.get("action") or "").lower()
+            if action == "call_tool":
+                tool_name = decision.get("tool_name") or ""
+                if tool_name not in tool_map:
+                    scratchpad.append(
+                        {
+                            "type": "error",
+                            "message": f"Requested tool {tool_name} was not found.",
+                        }
+                    )
+                    continue
+                arguments = decision.get("arguments") or {}
+                resolved = tool_map[tool_name]
+                tool_label = resolved.label
+                try:
+                    result = await resolved.tool.ainvoke(arguments)
+                except Exception as exc:  # pragma: no cover - external service call
+                    log.exception(
+                        "MCP tool execution failed",
+                        extra={
+                            "stage": stage_title,
+                            "tool": tool_label,
+                            "exception": exc,
+                        },
+                    )
+                    result = {"error": str(exc)}
+                else:
+                    result = self._serialize_tool_output(result)
+
+                formatted_result = self._format_tool_result(result, max_chars=400)
+                scratchpad.append(
+                    {
+                        "type": "tool",
+                        "tool": tool_label,
+                        "input": arguments,
+                        "output": formatted_result,
+                    }
+                )
+                used_tools.append(tool_label)
+                existing_value = stage_results.get(tool_label)
+                if existing_value is None:
+                    stage_results[tool_label] = [result]
+                elif isinstance(existing_value, list):
+                    existing_value.append(result)
+                else:
+                    stage_results[tool_label] = [existing_value, result]
+                await self._emit(
+                    "reasoning",
+                    {
+                        "stage": "mcp_tool",
+                        "node": stage_key,
+                        "tool": tool_label,
+                        "message": f"Executing {tool_label} inside {stage_title}",
+                    },
+                )
+                continue
+
+            summary = decision.get("summary", "").strip()
+            break
+
+        status = "completed" if stage_results else "skipped"
+        notes_lines: List[str] = []
+        if scratchpad:
+            for entry in scratchpad:
+                if entry.get("type") == "tool":
+                    notes_lines.append(
+                        f"{entry['tool']} input: {entry['input']}\noutput: {entry['output']}"
+                    )
+                elif entry.get("type") == "error":
+                    notes_lines.append(entry.get("message", ""))
+        if summary:
+            notes_lines.append(f"Summary: {summary}")
+        notes = "\n".join(filter(None, notes_lines)) or "Tool results are empty."
+
+        emit_message = (
+            f"{stage_title} stage completed ({len(stage_results)} tool runs)"
+            if stage_results
+            else f"Skipping {stage_title}. No suitable tool execution was performed."
+        )
+
+        return {
+            "results": stage_results,
+            "used_tools": used_tools,
+            "status": status,
+            "notes": notes,
+            "emit_message": emit_message,
+        }
+
+    def _build_stage_agent_prompt(
+        self,
+        *,
+        stage_title: str,
+        stage_description: str,
+        query: str,
+        resolved_tools: List[ResolvedMCPTool],
+        scratchpad: List[Dict[str, Any]],
+    ) -> str:
+        tool_sections = []
+        for resolved in resolved_tools:
+            schema = getattr(resolved.tool, "args", None)
+            if not schema and hasattr(resolved.tool, "args_schema"):
+                schema_model = getattr(resolved.tool, "args_schema")
+                if hasattr(schema_model, "schema"):
+                    schema = schema_model.schema()
+            schema_text = (
+                json.dumps(schema, ensure_ascii=False, indent=2)
+                if schema
+                else "Input schema is unavailable"
+            )
+            tool_sections.append(
+                "\n".join(
+                    [
+                        f"- Tool name: {resolved.tool.name}",
+                        f"  Server: {resolved.server_name}",
+                        f"  Description: {getattr(resolved.tool, 'description', '')}",
+                        f"  Schema: {schema_text}",
+                    ]
+                )
+            )
+
+        history_lines = []
+        for entry in scratchpad:
+            if entry.get("type") == "tool":
+                history_lines.append(
+                    f"[Tool Run] {entry['tool']} input={entry['input']} output={entry['output']}"
+                )
+            elif entry.get("type") == "error":
+                history_lines.append(f"[Error] {entry.get('message')}")
+        history_text = "\n".join(history_lines) if history_lines else "None"
+
+        return (
+            f"Stage: {stage_title}\nGoal: {stage_description}\n"
+            f"User question: {query}\n"
+            f"Available MCP tools:\n{''.join(tool_sections)}\n\n"
+            "Action guidelines:\n"
+            "1. If needed, call one tool at a time using a JSON command.\n"
+            "2. Review each tool output before deciding on additional calls.\n"
+            "3. When done, reply with action=\"finish\" and a summary.\n"
+            "Output examples:\n"
+            '{"action": "call_tool", "tool_name": "tool", "arguments": {"query": "..."}}\n'
+            '{"action": "finish", "summary": "..."}\n'
+            f"Progress so far:\n{history_text}"
+        )
+
+    # Legacy MCP tool-node helpers (removed)
+
     async def _router_node(self, state: GraphState) -> GraphState:
-        # Router node does not mutate the state – decision happens in _route_decision.
+        # New structure: route every request through the MCP combined workflow
         await self._emit(
             "reasoning",
             {
                 "stage": "router",
-                "message": "요청을 분석하여 검색 필요 여부를 판단합니다.",
+                "message": "Routing the question through the bio/drug-discovery MCP workflow stages.",
+                "pipeline": [stage["title"] for stage in self._workflow_stage_configs],
             },
         )
         return state
 
-    async def _route_decision(self, state: GraphState) -> str:
-        question = state["original_question"]
-        prompt = (
-            "다음 사용자 질문에 대해 응답 방식을 결정하세요.\n"
-            "- 친근한 인사나 일반 정보로 충분하면 'general'\n"
-            "- 최신 뉴스나 웹 정보가 필요하면 'search'\n"
-            "- 사내 문서, 매뉴얼, 보고서 등 내부 자료에서 찾아야 하면 'document'\n"
-            "위 셋 중 하나만 소문자로 출력하고 설명을 덧붙이지 마세요."
-        )
+    # Legacy routing logic (removed)
 
-        decision = await self._simple_llm_call(prompt, question)
-        import difflib
-        candidates = ["general", "search", "document"]
-        lowered = decision.lower().strip()
-        best_match = difflib.get_close_matches(lowered, candidates, n=1, cutoff=0.5)
-        normalized = best_match[0] if best_match else "general"
-        await self._emit(
-            "reasoning",
-            {
-                "stage": "router",
-                "message": "판단 결과: "
-                + (
-                    "문서 검색" if normalized == "document"
-                    else "검색 필요" if normalized == "search" else "일반 대화"
-                ),
-            },
-        )
-        return normalized
-
-    async def _query_refinement_node(self, state: GraphState) -> GraphState:
-        iteration = state["search_iterations"] + 1
-        summaries_text = "\n".join(state["search_results_summary"]) or "없음"
-
-        search_date = _current_search_date()
-        system_prompt = (
-            "당신은 검색 질의 최적화 도우미입니다. 사용자의 질문과 지금까지의 검색 요약을 참고하여\n"
-            "다음 검색을 위한 가장 유용한 단일 검색어를 만드세요.\n"
-            "가능한 한 구체적으로 작성하며 한국어 사용자에게 적합한 언어를 선택하세요.\n"
-            f"오늘 날짜는 {search_date}입니다. 최신 정보가 필요하다면 날짜를 참고하세요.\n"
-            "출력은 검색어 문장만 포함해야 합니다."
-        )
-
-        user_prompt = (
-            f"사용자 질문: {state['original_question']}\n"
-            f"이전 검색 요약: {summaries_text}\n"
-            f"현재 날짜: {search_date}\n"
-            "다음 검색어를 제안하세요."
-        )
-
-        refined_query = await self._simple_llm_call(system_prompt, user_prompt, temperature=0.2)
-        refined_query = refined_query.strip()
-        search_date = _current_search_date()
-        refined_query = _append_search_date_to_query(refined_query, search_date)
-
-        await self._emit(
-            "reasoning",
-            {
-                "stage": "query_refinement",
-                "iteration": iteration,
-                "message": f"검색어 생성 중: {refined_query}",
-                "query": refined_query,
-                "search_date": search_date,
-            },
-        )
-
-        state["current_search_query"] = refined_query
-        return state
-
-    async def _search_and_summarize_node(self, state: GraphState) -> GraphState:
-        iteration = state["search_iterations"] + 1
-        query = state.get("current_search_query") or state["original_question"]
-
-        await self._emit(
-            "reasoning",
-            {
-                "stage": "search",
-                "iteration": iteration,
-                "message": f"웹 검색 실행: {query}",
-                "mcp_binding": self._node_mcp_bindings.get("search_and_summarize"),
-            },
-        )
-
-        search_state = States()
-        search_state.tool_state = ToolState()
-        search_results = await web_search(
-            search_state,
-            search_query=[{"q": query, "recency": None, "domains": None}],
-            response_length="long",
-        )
-
-        if isinstance(search_results, str):
-            summary = f"검색 오류: {search_results}"
-        elif not search_results:
-            summary = "검색 결과가 없습니다."
-        else:
-            top_snippets = "\n".join(
-                f"- 제목: {item.get('title','')}\n  요약: {item.get('snippet','')}\n  URL: {item.get('url','')}"
-                for item in search_results[:5]
-            )
-
-            system_prompt = (
-                "당신은 정보를 요약하는 전문가입니다. 아래 검색 결과를 참고하여 핵심 정보를 3-5문장으로 요약하세요.\n"
-                "출처가 있다면 괄호로 표기하고, 중요 사실을 위주로 작성하세요."
-            )
-            user_prompt = (
-                f"사용자 질문: {state['original_question']}\n"
-                f"검색 결과:\n{top_snippets}"
-            )
-            summary = await self._simple_llm_call(system_prompt, user_prompt, temperature=0.4)
-
-        state["search_iterations"] = iteration
-        state["search_results_summary"].append(summary.strip())
-
-        await self._emit(
-            "reasoning",
-            {
-                "stage": "summary",
-                "iteration": iteration,
-                "message": f"웹 검색 결과 요약: {summary.strip()}",
-                "summary": summary.strip(),
-            },
-        )
-
-        return state
-
-    async def _search_loop_condition(self, state: GraphState) -> str:
-        return "continue" if state["search_iterations"] < 2 else "done"
-
-    async def _document_lookup_node(self, state: GraphState) -> GraphState:
-        query = state["original_question"]
-        await self._emit(
-            "reasoning",
-            {
-                "stage": "document_lookup",
-                "message": "문서 벡터 DB에서 관련 정보를 검색합니다.",
-                "query": query,
-            },
-        )
-
-        try:
-            results = await self._document_search(query)
-        except Exception as exc:
-            log.exception("Document search failed", extra={"query": query})
-            await self._emit(
-                "reasoning",
-                {
-                    "stage": "document_lookup",
-                    "message": f"문서 검색 중 오류 발생: {exc}",
-                },
-            )
-            results = []
-
-        state["document_results"] = results
-
-        await self._emit(
-            "reasoning",
-            {
-                "stage": "document_lookup",
-                "message": (
-                    "문서 검색 결과 없음" if not results else f"문서 {len(results)}건 확보"
-                ),
-                "results": results,
-            },
-        )
-
-        return state
-
-    async def _document_answer_node(self, state: GraphState) -> GraphState:
-        documents = state.get("document_results", [])
-
-        if not documents:
-            await self._emit(
-                "reasoning",
-                {
-                    "stage": "document_answer",
-                    "message": "문서 검색 결과가 없어 일반 답변으로 전환합니다.",
-                },
-            )
-            return await self._direct_answer_node(state)
-
-        context_blocks = []
-        for item in documents:
-            file_name = item.get("file_name") or "알 수 없는 문서"
-            page = item.get("page")
-            position = item.get("position")
-            location = ", ".join(
-                str(part)
-                for part in [
-                    f"페이지 {page}" if page is not None else None,
-                    f"위치 {position}" if position is not None else None,
-                ]
-                if part
-            )
-            content = item.get("content") or ""
-            block = (
-                f"문서: {file_name}{' (' + location + ')' if location else ''}\n"
-                f"내용: {content}"
-            )
-            context_blocks.append(block)
-
-        context = "\n\n".join(context_blocks)
-        user_question = state["original_question"]
-
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "다음은 사내 또는 내부 문서에서 추출한 관련 내용입니다. "
-                    "제공된 문맥을 기반으로 질문에 구체적으로 답변하세요. "
-                    "문서명을 언급하고, 확실하지 않은 경우 솔직하게 말하세요."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"질문: {user_question}\n\n"
-                    f"활용 가능한 문서 조각:\n{context}"
-                ),
-            },
-        ]
-
-        await self._emit(
-            "reasoning",
-            {
-                "stage": "document_answer",
-                "message": "문서 맥락을 기반으로 답변을 생성합니다.",
-            },
-        )
-
-        final_message = await self._stream_answer(
-            messages,
-            tools=self._get_node_tool_schemas("final_answer"),
-        )
-        state["messages"].append(final_message)
-        state["final_answer"] = final_message.get("content", "")
-        return state
+    # Legacy search/document nodes (removed)
 
     async def _direct_answer_node(self, state: GraphState) -> GraphState:
         last_messages = state["messages"]
@@ -408,7 +510,7 @@ class LangGraphSearchAgent:
             "reasoning",
             {
                 "stage": "final",
-                "message": "검색 없이 바로 답변을 생성합니다.",
+                "message": "Producing a direct answer without running additional searches.",
             },
         )
 
@@ -418,23 +520,74 @@ class LangGraphSearchAgent:
         return state
 
     async def _final_answer_node(self, state: GraphState) -> GraphState:
-        context = "\n\n".join(state["search_results_summary"])
+        workflow_results: Dict[str, Dict[str, Any]] = state.get("mcp_tool_results", {})
+
+        if not any(workflow_results.values()):
+            await self._emit(
+                "reasoning",
+                {
+                    "stage": "final",
+                    "message": "MCP 툴 결과가 없어 일반 답변으로 전환합니다.",
+                },
+            )
+            return await self._direct_answer_node(state)
+
+        overview_lines: List[str] = []
+        context_blocks: List[str] = []
+        for stage in self._workflow_stage_configs:
+            title = stage["title"]
+            description = stage.get("description", "")
+            stage_payload = workflow_results.get(title)
+            if not stage_payload:
+                continue
+
+            tool_names = ", ".join(stage_payload.keys()) or "툴 없음"
+            overview_lines.append(f"- {title}: {description} (툴: {tool_names})")
+
+            stage_lines = [f"[{title}] {description}"]
+            for tool_name, result in stage_payload.items():
+                formatted = self._format_tool_result(result)
+                stage_lines.append(f"{tool_name} 결과:\n{formatted}")
+            context_blocks.append("\n".join(stage_lines))
+
+        if not context_blocks:
+            await self._emit(
+                "reasoning",
+                {
+                    "stage": "final",
+                    "message": "워크플로우 결과가 비어 있어 일반 답변으로 전환합니다.",
+                },
+            )
+            return await self._direct_answer_node(state)
+
+        workflow_overview = "\n".join(overview_lines)
+        context = "\n\n".join(context_blocks)
         user_question = state["original_question"]
+
+        trace_notes = state.get("workflow_trace", [])
+        trace_summary = "\n".join(
+            f"{item.get('stage')}: {item.get('notes', '').strip()}"
+            for item in trace_notes
+            if item.get("notes")
+        )
 
         messages = [
             {
                 "role": "system",
                 "content": (
-                    f"당신은 Perplexity 스타일의 AI 어시스턴트입니다.\n"
-                    f"다음 검색 요약을 참고하여 질문에 답변하세요.\n"
-                    f"필요 시 출처를 간단히 언급하되, 말투는 친절하고 단정하게 유지하세요."
+                    "당신은 바이오/신약 개발 전문 어시스턴트입니다. "
+                    "아래 단계별 MCP 데이터를 기반으로 일관된 연구 보고서를 작성하세요. "
+                    "각 단계(타겟 발굴 → 오믹스 분석 → 경로 분석 → 화합물 탐색 → 구조 분석 → 임상 정보)를 모두 언급하고 "
+                    "사용된 MCP 데이터의 한계나 후속 조치도 제안하세요."
                 ),
             },
             {
                 "role": "user",
                 "content": (
-                    f"질문: {user_question}\n"
-                    f"누적 검색 요약:\n{context}"
+                    f"질문: {user_question}\n\n"
+                    f"워크플로우 개요:\n{workflow_overview}\n\n"
+                    + (f"단계별 주요 메모:\n{trace_summary}\n\n" if trace_summary else "")
+                    + f"세부 데이터:\n{context}"
                 ),
             },
         ]
@@ -443,7 +596,7 @@ class LangGraphSearchAgent:
             "reasoning",
             {
                 "stage": "final",
-                "message": "검색 결과를 종합하여 최종 답변을 생성합니다.",
+                "message": "바이오 워크플로우 결과를 바탕으로 최종 답변을 생성합니다.",
             },
         )
 
@@ -451,6 +604,62 @@ class LangGraphSearchAgent:
         state["messages"].append(final_message)
         state["final_answer"] = final_message.get("content", "")
         return state
+
+    @staticmethod
+    def _format_tool_result(result: Any, *, max_chars: int = 1200) -> str:
+        if isinstance(result, (dict, list)):
+            text = json.dumps(result, ensure_ascii=False, indent=2)
+        else:
+            text = str(result)
+        text = text.strip()
+        if not text:
+            return "Result is empty."
+        if len(text) > max_chars:
+            return text[:max_chars] + "... (truncated)"
+        return text
+
+    def _build_default_tool_args(self, tool: BaseTool, query: str) -> Dict[str, Any]:
+        field_candidates = self._extract_tool_fields(tool)
+        preferred = ("query", "text", "prompt", "input", "question")
+        for field in preferred:
+            if field in field_candidates:
+                return {field: query}
+        if field_candidates:
+            return {field_candidates[0]: query}
+        return {"query": query}
+
+    @staticmethod
+    def _extract_tool_fields(tool: BaseTool) -> List[str]:
+        schema = getattr(tool, "args", None)
+        if isinstance(schema, dict):
+            if "properties" in schema:
+                return list(schema["properties"].keys())
+            return list(schema.keys())
+        args_schema = getattr(tool, "args_schema", None)
+        if hasattr(args_schema, "__fields__"):
+            return list(args_schema.__fields__.keys())
+        return []
+
+    @staticmethod
+    def _serialize_tool_output(result: Any) -> Any:
+        if isinstance(result, ToolMessage):
+            return {
+                "type": "tool_message",
+                "name": result.name,
+                "status": result.status,
+                "content": result.content,
+                "artifact": getattr(result, "artifact", None),
+                "tool_call_id": result.tool_call_id,
+            }
+        if Command is not None and isinstance(result, Command):
+            return {
+                "type": "command",
+                "graph": result.graph,
+                "update": result.update,
+                "resume": result.resume,
+                "goto": result.goto,
+            }
+        return result
 
     async def _stream_answer(
         self,
@@ -545,6 +754,8 @@ class LangGraphSearchAgent:
             "current_search_query": None,
             "final_answer": None,
             "document_results": [],
+            "mcp_tool_results": {},
+            "workflow_trace": [],
         }
 
         result_state: GraphState = await self._graph.ainvoke(initial_state)
@@ -576,11 +787,11 @@ class LangGraphSearchAgent:
         grpc_port = int(os.getenv("WEAVIATE_GRPC_PORT", "50051"))
         serving_id = int(os.getenv("EMBEDDING_SERVING_ID", "10"))
         token = os.getenv("EMBEDDING_BEARER_TOKEN", "")
-        base_url = os.getenv("EMBEDDING_BASE_URL", "https://genos.mnc.ai:3443")
+        base_url = os.getenv("EMBEDDING_BASE_URL", "https://genos.genon.ai:3443")
 
         if not idx or not token:
             log.warning(
-                "Vectordb 환경 변수가 설정되지 않아 문서 검색을 비활성화합니다.",
+                "Vectordb environment variables are missing; document search will be disabled.",
                 extra={"idx": idx, "has_token": bool(token)},
             )
             return None
