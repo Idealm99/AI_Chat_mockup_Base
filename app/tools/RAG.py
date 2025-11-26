@@ -15,7 +15,7 @@ class embedding_serving:
     def __init__(self, serving_id:int = None, bearer_token:str = None, genos_url:str = None):
         import os
         self.serving_id = serving_id if serving_id is not None else int(os.getenv("EMBEDDING_SERVING_ID", "10"))
-        self.url = f"{genos_url or os.getenv('EMBEDDING_BASE_URL', 'https://genos.mnc.ai:3443')}/api/gateway/rep/serving/{self.serving_id}"
+        self.url = f"{genos_url or os.getenv('EMBEDDING_BASE_URL', 'https://genos.genon.ai:3443')}/api/gateway/rep/serving/{self.serving_id}"
         token = bearer_token if bearer_token is not None else os.getenv("EMBEDDING_BEARER_TOKEN", "")
         self.headers = dict(Authorization=f"Bearer {token}")
         if not self.serving_id or not token:
