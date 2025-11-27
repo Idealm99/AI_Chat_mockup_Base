@@ -155,26 +155,55 @@ class LangGraphSearchAgent:
 
     def _build_graph(self):
         graph = StateGraph(GraphState)
+        # router → classify → (mcp_workflow | direct_answer)
         graph.add_node("router", self._router_node)
-        previous_node = "router"
+        graph.add_node("classify", self._classify_node)
+        graph.add_node("direct_answer", self._direct_answer_node)
         for stage in self._workflow_stage_configs:
             node_name = stage["key"]
             graph.add_node(node_name, self._make_workflow_stage_node(stage))
-            graph.add_edge(previous_node, node_name)
-            previous_node = node_name
-
         graph.add_node("final_answer", self._final_answer_node)
 
         graph.set_entry_point("router")
+        graph.add_edge("router", "classify")
 
-        graph.add_edge(previous_node, "final_answer")
+        # classify에서 분기: 제약/바이오/임상 등 키워드 포함시 mcp_workflow, 아니면 direct_answer
+        def classify_branch(state: GraphState):
+            question = state.get("original_question", "").lower()
+            keywords = ["drug", "bio", "biotech", "compound", "protein", "gene", "clinical", "trial", "fda", "chemb", "pubchem", "kegg", "reactome", "structure", "pdb", "target", "omics"]
+            if any(k in question for k in keywords):
+                # 첫 워크플로우 노드로 이동
+                return self._workflow_stage_configs[0]["key"]
+            return "direct_answer"
 
-        graph.add_conditional_edges(
-            "final_answer",
-            lambda _: END,
-        )
+        graph.add_conditional_edges("classify", classify_branch)
+
+        # 워크플로우 노드 연결
+        for i, stage in enumerate(self._workflow_stage_configs):
+            node_name = stage["key"]
+            if i < len(self._workflow_stage_configs) - 1:
+                next_node = self._workflow_stage_configs[i+1]["key"]
+                graph.add_edge(node_name, next_node)
+            else:
+                graph.add_edge(node_name, "final_answer")
+
+        graph.add_conditional_edges("final_answer", lambda _: END)
+        graph.add_conditional_edges("direct_answer", lambda _: END)
 
         return graph.compile()
+    async def _classify_node(self, state: GraphState) -> GraphState:
+        # 질문 분류 노드: 분기만 담당 (emit으로 분류 결과 알림)
+        question = state.get("original_question", "")
+        keywords = ["drug", "bio", "biotech", "compound", "protein", "gene", "clinical", "trial", "fda", "chemb", "pubchem", "kegg", "reactome", "structure", "pdb", "target", "omics"]
+        is_mcp = any(k in question.lower() for k in keywords)
+        await self._emit(
+            "reasoning",
+            {
+                "stage": "classify",
+                "message": f"질문 분류 결과: {'제약/바이오 관련' if is_mcp else '일반 질문'}로 판단됨.",
+            },
+        )
+        return state
 
     def _compile_workflow_stages(self) -> List[Dict[str, Any]]:
         compiled: List[Dict[str, Any]] = []
