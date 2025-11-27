@@ -215,7 +215,7 @@ class LangGraphSearchAgent:
                 "reasoning",
                 {
                     "stage": stage_key,
-                    "message": f"Running {stage_title}: {stage_description}",
+                    "message": f"{stage_title} 단계 실행 중: {stage_description}",
                     "query": query,
                     "tools": list(stage_servers),
                 },
@@ -247,7 +247,7 @@ class LangGraphSearchAgent:
                     "reasoning",
                     {
                         "stage": stage_key,
-                        "message": f"Skipping {stage_title}. No MCP tools are available.",
+                        "message": f"{stage_title} 단계를 건너뜁니다. 사용 가능한 MCP 툴이 없습니다.",
                     },
                 )
                 return state
@@ -265,7 +265,7 @@ class LangGraphSearchAgent:
                     "reasoning",
                     {
                         "stage": stage_key,
-                        "message": f"Skipping {stage_title}. No converted MCP tools are available.",
+                        "message": f"{stage_title} 단계를 건너뜁니다. 변환된 MCP 툴이 없습니다.",
                     },
                 )
                 return state
@@ -388,7 +388,7 @@ class LangGraphSearchAgent:
                         "stage": "mcp_tool",
                         "node": stage_key,
                         "tool": tool_label,
-                        "message": f"Executing {tool_label} inside {stage_title}",
+                        "message": f"{stage_title} 단계에서 {tool_label} 실행 중",
                     },
                 )
                 continue
@@ -411,9 +411,9 @@ class LangGraphSearchAgent:
         notes = "\n".join(filter(None, notes_lines)) or "Tool results are empty."
 
         emit_message = (
-            f"{stage_title} stage completed ({len(stage_results)} tool runs)"
+            f"{stage_title} 단계 완료 ({len(stage_results)}개 툴 실행)"
             if stage_results
-            else f"Skipping {stage_title}. No suitable tool execution was performed."
+            else f"{stage_title} 단계를 건너뜁니다. 실행된 툴이 없습니다."
         )
 
         return {
@@ -488,7 +488,7 @@ class LangGraphSearchAgent:
             "reasoning",
             {
                 "stage": "router",
-                "message": "Routing the question through the bio/drug-discovery MCP workflow stages.",
+                "message": "질문을 바이오/신약개발 MCP 워크플로우 단계로 라우팅합니다.",
                 "pipeline": [stage["title"] for stage in self._workflow_stage_configs],
             },
         )
@@ -510,7 +510,7 @@ class LangGraphSearchAgent:
             "reasoning",
             {
                 "stage": "final",
-                "message": "Producing a direct answer without running additional searches.",
+                "message": "추가 검색 없이 직접 답변을 생성합니다.",
             },
         )
 
