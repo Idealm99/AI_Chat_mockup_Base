@@ -459,18 +459,23 @@ class LangGraphSearchAgent:
         )
         
         # JSON 파싱
-        response = response.strip()
+        raw_response = response.strip()
+        cleaned_response = self._clean_json_response(raw_response)
         rationale = ""
         next_choice = pending_agent or "TV"  # fallback을 pending_agent로 변경
         
         try:
-            payload = json.loads(response)
+            payload = json.loads(cleaned_response)
             rationale = payload.get("visible_rationale") or payload.get("rationale", "")
             next_choice = payload.get("next", "").strip().upper()
         except json.JSONDecodeError:
             log.warning(
                 "MCP classifier JSON parsing failed; using fallback",
-                extra={"response": response, "fallback": next_choice},
+                extra={
+                    "response": raw_response,
+                    "cleaned": cleaned_response,
+                    "fallback": next_choice,
+                },
             )
             rationale = f"JSON parsing failed; defaulting to {next_choice}."
         
@@ -494,7 +499,7 @@ class LangGraphSearchAgent:
 
         state["next"] = next_choice
         state["rationale"] = rationale
-        state["_classify_mcp_raw"] = response
+        state["_classify_mcp_raw"] = raw_response
         
         self._append_history(
             state,
@@ -534,6 +539,28 @@ class LangGraphSearchAgent:
             stage_visits[stage_key] = stage_visits.get(stage_key, 0) + 1
         state["_last_mcp_stage"] = stage_key
         return state
+
+    @staticmethod
+    def _clean_json_response(text: str) -> str:
+        """Remove markdown fences and isolate the JSON object."""
+        if not text:
+            return text
+        stripped = text.strip()
+        if stripped.startswith("```"):
+            # Remove ```json ... ``` fences
+            parts = stripped.split("```")
+            if len(parts) >= 3:
+                stripped = parts[1 if parts[1].strip() else 2].strip()
+                if stripped.lower().startswith("json"):
+                    stripped = stripped[4:].lstrip()
+            else:
+                stripped = stripped.strip("`")
+        # Extract first JSON object braces if extra text remains
+        first = stripped.find("{")
+        last = stripped.rfind("}")
+        if first != -1 and last != -1 and last > first:
+            return stripped[first : last + 1]
+        return stripped
 
     async def _history_length_check_node(self, state: GraphState) -> GraphState:
         content = self._history_text(state)
