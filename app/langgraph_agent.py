@@ -13,8 +13,6 @@ from langgraph.graph import StateGraph, END
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool
 
-from rdkit import Chem
-from rdkit.Chem import Descriptors, Draw
 
 try:
     from langgraph.types import Command
@@ -1529,12 +1527,6 @@ class LangGraphSearchAgent:
             return message
         return message.content or ""
 
-    def _2d_smiles_structure_image_url(self, smiles: str) -> str:
-        smiles_mol = Chem.MolFromSmiles(smiles)
-        
-        mol_weight = Descriptors.MolWt(smiles_mol)
-        image_url = Draw.MolToImage(smiles_mol)
-        return {"image_url": image_url, "mol_weight": mol_weight}
 
     def _build_ui_payload(self, state: GraphState) -> Optional[Dict[str, Any]]:
         workflow_results: Dict[str, Dict[str, Any]] = state.get("mcp_tool_results", {}) or {}
