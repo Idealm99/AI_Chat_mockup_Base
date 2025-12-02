@@ -5,7 +5,7 @@ import asyncio
 import json
 import os
 from datetime import date
-from typing import Any, Awaitable, Callable, Dict, List, NotRequired, Optional, Tuple, TypedDict
+from typing import Any, Awaitable, Callable, Dict, List, NotRequired, Optional, Tuple, TypedDict, Union
 
 import re
 
@@ -62,6 +62,10 @@ class GraphState(TypedDict):
     next: str
     step_count: int
     rationale: str
+    _classify_is_mcp: NotRequired[bool]
+    _classify_llm_result: NotRequired[str]
+    _classify_keyword_match: NotRequired[bool]
+    _stage_visit_counts: NotRequired[Dict[str, int]]
 
 
 def _current_search_date() -> str:
@@ -90,13 +94,18 @@ class LangGraphSearchAgent:
     """LangGraph-powered conversational search agent with streaming reasoning events."""
 
     MAX_STAGE_AGENT_STEPS = 4
+    MAX_WORKFLOW_ITERATIONS = 8
+    MAX_STAGE_AGENT_TOOLS = 3
+    FALLBACK_TOOL_LIMIT = 1
 
-    NODE_MCP_REQUIREMENTS = {
-        "mcp_combined": {
-            "preferred_aliases": ["alphafold", "pdb", "alphafold-server", "pdb-server","AlphaFold-MCP-Server","PDB-MCP-Server"],
-            "contains_keywords": ["alphafold", "pdb", "structure", "protein"],
-        }
-    }
+    # NOTE: NODE_MCP_REQUIREMENTS는 레거시 설정으로, 현재 워크플로우에서는 사용되지 않음
+    # 실제 MCP 서버 바인딩은 WORKFLOW_DEFINITION의 tool_names를 통해 이루어짐
+    # NODE_MCP_REQUIREMENTS = {
+    #     "mcp_combined": {
+    #         "preferred_aliases": ["alphafold", "pdb", "alphafold-server", "pdb-server","AlphaFold-MCP-Server","PDB-MCP-Server"],
+    #         "contains_keywords": ["alphafold", "pdb", "structure", "protein"],
+    #     }
+    # }
 
     PROFESSIONAL_KEYWORDS = [
         "약", "단백질", "임상", "유전자", "화합물", "구조", "신약", "바이오", "의약", "임상시험",
@@ -105,6 +114,8 @@ class LangGraphSearchAgent:
     ]
 
     WORKFLOW_DEFINITION: Tuple[Dict[str, Any], ...] = (
+        # 각 워크플로우 단계는 MCP 서버를 통해 실행되는 전문 분석 단계입니다.
+        # tool_names에 지정된 MCP 서버들이 해당 단계에서 사용 가능한 도구를 제공합니다.
         {
             "key": "target_agent",
             "title": "TargetAgent",
@@ -121,7 +132,7 @@ class LangGraphSearchAgent:
             "key": "chem_agent",
             "title": "ChemAgent",
             "description": "Collect compounds acting on the pathway together with their activity data.",
-            "tool_names": ("PubChem-MCP-Server", "ChEMBL-MCP-Server"),
+            "tool_names": ("ChEMBL-MCP-Server",),
         },
         {
             "key": "structure_agent",
@@ -153,16 +164,28 @@ class LangGraphSearchAgent:
     ) -> None:
         self.model = model or _get_default_model()
         self._client = _get_openai_client()
+        self._emitter: Optional[Emitter] = emitter
+        
+        # MCP adapter 및 workflow 초기화
         self._mcp_adapter = MCPAdapterClient()
         self._workflow_stage_configs = self._compile_workflow_stages()
         self._workflow_stage_functions = {
             stage["key"]: self._make_workflow_stage_node(stage)
             for stage in self._workflow_stage_configs
         }
-        self._graph = self._build_graph()
-        self._emitter: Optional[Emitter] = emitter
+        
+        # Agent priority 및 stage mapping 초기화
+        self._agent_priority: Tuple[str, ...] = tuple(self.MCP_AGENT_TO_STAGE.keys())
+        self._stage_to_agent_code: Dict[str, str] = {
+            stage_key: agent_code for agent_code, stage_key in self.MCP_AGENT_TO_STAGE.items()
+        }
+        
+        # VectorDB 초기화 (환경 변수 미리 체크)
         self._vectordb: Optional[vectordb] = None
-        self._node_mcp_bindings = self._initialize_node_mcp_bindings()
+        self._vectordb_enabled = self._check_vectordb_env()
+        
+        # 그래프는 모든 설정 후 마지막에 빌드
+        self._graph = self._build_graph()
 
     def set_emitter(self, emitter: Optional[Emitter]) -> None:
         self._emitter = emitter
@@ -175,9 +198,23 @@ class LangGraphSearchAgent:
         except Exception:
             log.exception("Failed to emit LangGraph event", extra={"event": event})
 
+    def _check_vectordb_env(self) -> bool:
+        """VectorDB 환경 변수를 미리 체크하여 사용 가능 여부 반환"""
+        idx = os.getenv("WEAVIATE_INDEX")
+        token = os.getenv("EMBEDDING_BEARER_TOKEN", "")
+        
+        if not idx or not token:
+            log.info(
+                "VectorDB is disabled due to missing environment variables",
+                extra={"has_index": bool(idx), "has_token": bool(token)},
+            )
+            return False
+        return True
+
     def _build_graph(self):
         graph = StateGraph(GraphState)
-        # router → general classify → (MCP classification + stage loop | direct answer)
+        
+        # 기본 노드 등록
         graph.add_node("router", self._router_node)
         graph.add_node("classify", self._classify_node)
         graph.add_node("classify_mcp", self._classify_mcp_node)
@@ -190,23 +227,28 @@ class LangGraphSearchAgent:
         graph.add_node("vector_search", self._vector_search_node)
         graph.add_node("final_answer", self._final_answer_node)
 
+        # Entry point
         graph.set_entry_point("router")
         graph.add_edge("router", "classify")
 
+        # Classify 분기: MCP vs Direct Answer
         def classify_branch(state: GraphState):
             if state.get("_classify_is_mcp"):
                 return "classify_mcp"
             return "direct_answer"
         graph.add_conditional_edges("classify", classify_branch)
 
+        # MCP Classify 분기: AG (RAG) vs MCP Execution
         def classify_mcp_branch(state: GraphState):
             if state.get("next", "").upper() == "AG":
                 return "search_query"
             return "mcp_execution"
         graph.add_conditional_edges("classify_mcp", classify_mcp_branch)
 
+        # MCP Execution 후 히스토리 체크
         graph.add_edge("mcp_execution", "history_length_check")
 
+        # 히스토리 길이 분기: Summary vs Increment
         def history_branch(state: GraphState):
             if state.get("_history_needs_summary"):
                 return "summary"
@@ -215,15 +257,18 @@ class LangGraphSearchAgent:
 
         graph.add_edge("summary", "increment_step")
 
+        # Step 카운트 분기: 반복 vs RAG 검색
         def step_branch(state: GraphState):
-            if state.get("step_count", 0) > 7:
+            if state.get("step_count", 0) >= self.MAX_WORKFLOW_ITERATIONS:
                 return "search_query"
             return "classify_mcp"
         graph.add_conditional_edges("increment_step", step_branch)
 
+        # RAG 검색 플로우
         graph.add_edge("search_query", "vector_search")
         graph.add_edge("vector_search", "final_answer")
 
+        # 종료 노드
         graph.add_conditional_edges("final_answer", lambda _: END)
         graph.add_conditional_edges("direct_answer", lambda _: END)
 
@@ -259,16 +304,29 @@ class LangGraphSearchAgent:
                 },
             )
             return state
+        
+        # 환경 변수 체크로 미리 disabled 확인
+        if not self._vectordb_enabled:
+            await self._emit(
+                "reasoning",
+                {
+                    "stage": "vector_search",
+                    "message": "벡터DB가 비활성화되어 있어 검색을 건너뜁니다.",
+                },
+            )
+            return state
+            
         db = await self._get_vectordb()
         if db is None:
             await self._emit(
                 "reasoning",
                 {
                     "stage": "vector_search",
-                    "message": "벡터DB 인스턴스가 없어 검색을 건너뜁니다.",
+                    "message": "벡터DB 인스턴스 초기화 실패로 검색을 건너뜁니다.",
                 },
             )
             return state
+            
         results = await asyncio.to_thread(db.hybrid_search, query)
         state["document_results"] = results
         await self._emit(
@@ -327,42 +385,120 @@ class LangGraphSearchAgent:
         return state
     
     async def _classify_mcp_node(self, state: GraphState) -> GraphState:
-        """Decide the next MCP agent by analyzing the current history."""
+        """Decide the next MCP agent by analyzing the current question and stage status."""
+        stage_visits = state.setdefault("_stage_visit_counts", {})
+        pending_agent = self._next_unvisited_agent(stage_visits)
+        iteration_budget_reached = state.get("step_count", 0) >= self.MAX_WORKFLOW_ITERATIONS
+
+        # 종료 조건: 최대 반복 또는 모든 스테이지 방문 완료
+        if iteration_budget_reached or (pending_agent is None and stage_visits):
+            state["next"] = "AG"
+            reason = (
+                "Stage iteration budget exhausted" if iteration_budget_reached else "All mapped MCP stages already visited"
+            )
+            rationale = f"{reason}; escalate to RAG search."
+            state["rationale"] = rationale
+            await self._emit(
+                "reasoning",
+                {
+                    "stage": "classify_mcp",
+                    "message": rationale,
+                },
+            )
+            self._append_history(
+                state,
+                "system",
+                f"Routing to RAG search: {rationale}",
+            )
+            return state
+
         question = state.get("original_question", "")
-        history_excerpt = self._history_text(state)[-3000:]
+        
+        # 방문한 스테이지와 미방문 스테이지 요약
+        visited_stages = [stage for stage, count in stage_visits.items() if count > 0]
+        unvisited_agents = [
+            agent for agent in self._agent_priority
+            if self.MCP_AGENT_TO_STAGE.get(agent)
+            and stage_visits.get(self.MCP_AGENT_TO_STAGE[agent], 0) == 0
+        ]
+        
+        # Agent 매핑 정보
+        agent_descriptions = {
+            "TV": "TargetAgent - Gene target identification",
+            "PI": "PathwayAgent - Signaling pathway analysis",
+            "CD": "ChemAgent - Compound activity data",
+            "SA": "StructureAgent - 3D structure & binding prediction",
+            "AG": "RAG Search - Document retrieval and synthesis"
+        }
+        
         format_choices = ", ".join(self.MCP_AGENT_CHOICES)
+        visited_info = ", ".join(visited_stages) if visited_stages else "None"
+        pending_info = ", ".join(unvisited_agents) if unvisited_agents else "None"
+        
+        # 간결하고 명확한 프롬프트
         system_prompt = (
-            "You are a strategic MCP workflow planner. You only decide which specialized agent to call next; you do not run tools. "
-            "Based on the conversation history and the user's current goal, choose the most critical agent and provide the rationale."
+            "You are a biomedical workflow router. Based on the user's question, "
+            "select the MOST CRITICAL next agent to call. Each agent handles a specific analysis stage:\n"
+            + "\n".join(f"- {code}: {desc}" for code, desc in agent_descriptions.items())
         )
+        
         user_prompt = (
-            f"History (truncated):\n{history_excerpt}\n"
-            f"Question: {question}\n"
-            f"Respond with JSON that has 'visible_rationale' (why the choice was made) and 'next' (one of {format_choices})."
+            f"User Question: {question}\n\n"
+            f"Already visited stages: {visited_info}\n"
+            f"Pending agents: {pending_info}\n\n"
+            f"Choose the next agent code from: {format_choices}\n"
+            f"Respond ONLY with valid JSON:\n"
+            '{"next": "<agent_code>", "visible_rationale": "<brief reason>"}'
         )
+        
         response = await self._simple_llm_call(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            temperature=0.2,
+            temperature=0.1,  # 더 결정적인 선택을 위해 낮춤
         )
+        
+        # JSON 파싱
         response = response.strip()
         rationale = ""
-        next_choice = "TV"
+        next_choice = pending_agent or "TV"  # fallback을 pending_agent로 변경
+        
         try:
             payload = json.loads(response)
             rationale = payload.get("visible_rationale") or payload.get("rationale", "")
             next_choice = payload.get("next", "").strip().upper()
         except json.JSONDecodeError:
-            rationale = "Unable to parse JSON output; falling back to the target agent."
+            log.warning(
+                "MCP classifier JSON parsing failed; using fallback",
+                extra={"response": response, "fallback": next_choice},
+            )
+            rationale = f"JSON parsing failed; defaulting to {next_choice}."
+        
+        # Validation
         if next_choice not in self.MCP_AGENT_CHOICES:
-            next_choice = "TV"
+            log.warning(
+                "Invalid agent choice; using pending agent",
+                extra={"choice": next_choice, "fallback": pending_agent or "TV"},
+            )
+            next_choice = pending_agent or "TV"
+            rationale = f"Invalid choice; defaulting to {next_choice}."
+
+        # 중복 방지: 이미 방문한 스테이지면 미방문 스테이지로 변경
+        chosen_stage = self.MCP_AGENT_TO_STAGE.get(next_choice)
+        already_completed = bool(chosen_stage and stage_visits.get(chosen_stage, 0))
+        if already_completed and pending_agent and pending_agent != next_choice:
+            rationale = (
+                (rationale + " ") if rationale else ""
+            ) + f"Override: {next_choice} already visited; selecting {pending_agent} instead."
+            next_choice = pending_agent
+
         state["next"] = next_choice
         state["rationale"] = rationale
         state["_classify_mcp_raw"] = response
+        
         self._append_history(
             state,
             "system",
-            f"MCP classifier selected {next_choice} because {rationale or 'no rationale was provided'}.",
+            f"MCP classifier selected {next_choice}: {rationale}",
         )
         await self._emit(
             "reasoning",
@@ -392,6 +528,9 @@ class LangGraphSearchAgent:
                 "system",
                 f"No workflow stage mapped for agent {next_agent}. Skipping MCP execution.",
             )
+        stage_visits = state.setdefault("_stage_visit_counts", {})
+        if stage_key:
+            stage_visits[stage_key] = stage_visits.get(stage_key, 0) + 1
         state["_last_mcp_stage"] = stage_key
         return state
 
@@ -534,13 +673,45 @@ class LangGraphSearchAgent:
             trace_entry["tools"].extend(agent_outcome["used_tools"])
             trace_entry["status"] = agent_outcome["status"]
             trace_entry["notes"] = agent_outcome["notes"]
+
+            emit_message = agent_outcome["emit_message"]
+            ran_llm_tools = bool(agent_outcome["used_tools"])
+            if not ran_llm_tools and not stage_results:
+                fallback_outcome = await self._run_fallback_tools(
+                    stage_key=stage_key,
+                    stage_title=stage_title,
+                    query=query,
+                    resolved_tools=resolved_tools,
+                )
+                if fallback_outcome["results"]:
+                    stage_results.update(fallback_outcome["results"])
+                trace_entry["tools"].extend(fallback_outcome["used_tools"])
+                fallback_notes = fallback_outcome["notes"]
+                if fallback_notes:
+                    combined_notes = filter(
+                        None,
+                        [trace_entry.get("notes"), f"Fallback run:\n{fallback_notes}"],
+                    )
+                    trace_entry["notes"] = "\n\n".join(combined_notes)
+                trace_entry["status"] = fallback_outcome["status"]
+                emit_message = fallback_outcome["emit_message"] or emit_message
+                if fallback_outcome["results"]:
+                    await self._emit(
+                        "reasoning",
+                        {
+                            "stage": stage_key,
+                            "message": f"{stage_title} 단계에서 LLM 에이전트가 도구를 실행하지 않아 기본 MCP 호출을 수행했습니다.",
+                            "results": list(stage_results.keys()),
+                        },
+                    )
+
             workflow_trace.append(trace_entry)
 
             await self._emit(
                 "reasoning",
                 {
                     "stage": stage_key,
-                    "message": agent_outcome["emit_message"],
+                    "message": emit_message,
                     "results": list(stage_results.keys()),
                 },
             )
@@ -582,21 +753,83 @@ class LangGraphSearchAgent:
                 scratchpad=scratchpad,
             )
 
-            response_text = await self._simple_llm_call(
+            # LangChain 도구를 OpenAI tools 형식으로 변환
+            tools_schema = self._convert_tools_to_openai_schema(resolved_tools)
+            
+            use_tool_schema = bool(tools_schema)
+            response_payload = await self._simple_llm_call(
                 system_prompt=(
                     f"You are the specialist agent for the {stage_title} stage. "
                     "Respond only with JSON that describes your next action."
                 ),
                 user_prompt=agent_instruction,
+                tools=tools_schema if tools_schema else None,
+                return_message=use_tool_schema,
             )
 
-            try:
-                decision = json.loads(response_text)
-            except json.JSONDecodeError:
-                decision = {"action": "finish", "summary": response_text.strip()}
+            tool_calls = []
+            if use_tool_schema:
+                response_message = response_payload
+                if hasattr(response_message, "tool_calls") and response_message.tool_calls:
+                    tool_calls = response_message.tool_calls
+                response_text = getattr(response_message, "content", "") if response_message else ""
+            else:
+                response_text = response_payload or ""
+
+            if tool_calls:
+                log.info(
+                    "LLM requested MCP tool via function call",
+                    extra={
+                        "stage": stage_key,
+                        "tool_name": tool_calls[0].function.name if tool_calls[0].function else None,
+                    },
+                )
+                call = tool_calls[0]
+                function_name = call.function.name if call.function else ""
+                arguments = {}
+                if call.function and call.function.arguments:
+                    try:
+                        arguments = json.loads(call.function.arguments)
+                    except json.JSONDecodeError:
+                        log.warning(
+                            "Failed to parse tool call arguments",
+                            extra={"stage": stage_key, "raw": call.function.arguments},
+                        )
+                        arguments = {}
+                decision = {
+                    "action": "call_tool",
+                    "tool_name": function_name,
+                    "arguments": arguments,
+                }
+            else:
+                try:
+                    decision = json.loads(response_text or "{}")
+                except json.JSONDecodeError:
+                    decision = {"action": "finish", "summary": (response_text or "").strip()}
+
+            log.debug(
+                "Stage agent decision parsed",
+                extra={
+                    "stage": stage_key,
+                    "action": decision.get("action"),
+                    "source": "tool_call" if tool_calls else "text",
+                    "response_excerpt": (response_text or "")[:200],
+                },
+            )
 
             action = (decision.get("action") or "").lower()
             if action == "call_tool":
+                # MAX_STAGE_AGENT_TOOLS 제한 체크 (도구 호출 전)
+                if len(used_tools) >= self.MAX_STAGE_AGENT_TOOLS:
+                    scratchpad.append(
+                        {
+                            "type": "error",
+                            "message": f"Tool budget limit ({self.MAX_STAGE_AGENT_TOOLS}) reached; cannot call more tools.",
+                        }
+                    )
+                    summary = summary or "Tool budget reached before this call; stopping."
+                    break
+                
                 tool_name = decision.get("tool_name") or ""
                 if tool_name not in tool_map:
                     scratchpad.append(
@@ -623,6 +856,23 @@ class LangGraphSearchAgent:
                     result = {"error": str(exc)}
                 else:
                     result = self._serialize_tool_output(result)
+                    
+                    # 빈 결과 체크
+                    if not self._is_meaningful_result(result):
+                        log.info(
+                            f"Stage agent tool {tool_label} returned empty data",
+                            extra={"tool": tool_label, "arguments": arguments},
+                        )
+                        scratchpad.append(
+                            {
+                                "type": "tool",
+                                "tool": tool_label,
+                                "input": arguments,
+                                "output": "빈 결과 (관련 데이터 없음)",
+                            }
+                        )
+                        # 빈 결과는 stage_results에 추가하지 않고 계속 진행
+                        continue
 
                 formatted_result = self._format_tool_result(result, max_chars=400)
                 scratchpad.append(
@@ -650,6 +900,7 @@ class LangGraphSearchAgent:
                         "message": f"{stage_title} 단계에서 {tool_label} 실행 중",
                     },
                 )
+                # 제한 체크는 위로 이동했으므로 여기서는 continue만
                 continue
 
             summary = decision.get("summary", "").strip()
@@ -682,6 +933,294 @@ class LangGraphSearchAgent:
             "notes": notes,
             "emit_message": emit_message,
         }
+
+    def _convert_tools_to_openai_schema(
+        self, resolved_tools: List[ResolvedMCPTool]
+    ) -> List[Dict[str, Any]]:
+        """Convert LangChain BaseTool to OpenAI function calling schema."""
+        tools_schema = []
+        for rt in resolved_tools:
+            tool = rt.tool  # ResolvedMCPTool is a dataclass, not a dict
+            
+            # LangChain BaseTool의 args_schema 속성 사용
+            parameters = {"type": "object", "properties": {}}
+            
+            # args_schema가 Pydantic model이면 schema() 호출
+            if hasattr(tool, 'args_schema') and tool.args_schema:
+                try:
+                    if hasattr(tool.args_schema, 'schema'):
+                        schema = tool.args_schema.schema()
+                        # Pydantic v2의 경우 model_json_schema() 사용
+                        if not schema and hasattr(tool.args_schema, 'model_json_schema'):
+                            schema = tool.args_schema.model_json_schema()
+                        if schema:
+                            parameters = schema
+                except Exception as e:
+                    log.warning(
+                        "Failed to extract args_schema",
+                        extra={"tool": tool.name, "error": str(e)}
+                    )
+            # 레거시: args 속성 폴백
+            elif hasattr(tool, 'args') and tool.args:
+                if isinstance(tool.args, dict):
+                    if "type" in tool.args and "properties" in tool.args:
+                        parameters = tool.args
+                    else:
+                        parameters = {
+                            "type": "object",
+                            "properties": tool.args,
+                        }
+            
+            function_schema = {
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "parameters": parameters
+                }
+            }
+            
+            # 디버깅: 첫 번째 도구의 스키마 로그 출력
+            if not tools_schema:
+                log.info(
+                    "First tool schema for OpenAI",
+                    extra={
+                        "tool_name": tool.name,
+                        "has_args_schema": hasattr(tool, 'args_schema'),
+                        "has_args": hasattr(tool, 'args'),
+                        "parameters_keys": list(parameters.keys()) if isinstance(parameters, dict) else None,
+                    }
+                )
+            
+            tools_schema.append(function_schema)
+        
+        return tools_schema
+
+    async def _run_fallback_tools(
+        self,
+        *,
+        stage_key: str,
+        stage_title: str,
+        query: str,
+        resolved_tools: List[ResolvedMCPTool],
+    ) -> Dict[str, Any]:
+        fallback_results: Dict[str, Any] = {}
+        used_tools: List[str] = []
+        notes_lines: List[str] = []
+        ranked_tools = self._rank_resolved_tools(query, resolved_tools)
+        limit = self.FALLBACK_TOOL_LIMIT or len(ranked_tools)
+        
+        log.info(
+            f"Fallback executing for {stage_title}",
+            extra={
+                "stage": stage_key,
+                "query": query,
+                "tool_count": len(ranked_tools),
+                "limit": limit,
+            },
+        )
+        
+        for resolved in ranked_tools[:limit]:
+            tool_label = resolved.label
+            default_args = self._build_default_tool_args(resolved.tool, query)
+            
+            log.info(
+                f"Fallback calling tool {tool_label}",
+                extra={
+                    "tool": tool_label,
+                    "args": default_args,
+                },
+            )
+            
+            try:
+                result = await resolved.tool.ainvoke(default_args)
+            except Exception as exc:  # pragma: no cover - external service
+                log.exception(
+                    "Fallback MCP tool execution failed",
+                    extra={
+                        "stage": stage_title,
+                        "tool": tool_label,
+                        "exception": exc,
+                    },
+                )
+                notes_lines.append(f"{tool_label} error: {exc}")
+                continue
+
+            serialized = self._serialize_tool_output(result)
+            
+            log.info(
+                f"Fallback tool {tool_label} result",
+                extra={
+                    "tool": tool_label,
+                    "result_type": type(result).__name__,
+                    "result_length": len(str(result)),
+                    "result_preview": str(result)[:200] if result else "None",
+                },
+            )
+            
+            # 빈 결과 필터링: 의미 있는 데이터가 있는지 검증
+            if not self._is_meaningful_result(serialized):
+                log.info(
+                    f"Fallback tool {tool_label} returned empty or meaningless data",
+                    extra={"tool": tool_label, "result": serialized},
+                )
+                notes_lines.append(
+                    f"[Fallback] {tool_label} input={default_args} → 빈 결과 (데이터 없음)"
+                )
+                continue
+            
+            fallback_results.setdefault(tool_label, []).append(serialized)
+            used_tools.append(tool_label)
+            formatted = self._format_tool_result(serialized, max_chars=400)
+            notes_lines.append(
+                f"[Fallback] {tool_label} input={default_args} output={formatted}"
+            )
+
+        # 도구 실행 수와 결과 수를 구분하여 메시지 생성
+        tools_executed = len(ranked_tools[:limit])
+        status = "completed" if fallback_results else "skipped"
+        
+        if fallback_results:
+            emit_message = f"{stage_title} 단계 기본 MCP 호출 완료 ({len(fallback_results)}개 툴에서 데이터 수집)"
+        elif tools_executed > 0:
+            emit_message = f"{stage_title} 단계에서 {tools_executed}개 MCP 도구를 실행했으나 관련 데이터를 찾지 못했습니다."
+        else:
+            emit_message = f"{stage_title} 단계에 사용 가능한 MCP 도구가 없습니다."
+        
+        notes = "\n".join(notes_lines) or "Fallback executed but produced no tool outputs."
+
+        if not fallback_results:
+            log.warning(
+                "Fallback MCP execution produced no results",
+                extra={
+                    "stage": stage_title,
+                    "stage_key": stage_key,
+                    "tools_executed": tools_executed,
+                    "tools_available": len(resolved_tools),
+                },
+            )
+
+        return {
+            "results": fallback_results,
+            "used_tools": used_tools,
+            "status": status,
+            "notes": notes,
+            "emit_message": emit_message,
+        }
+
+    def _is_meaningful_result(self, result: Any) -> bool:
+        """
+        빈 결과인지 검증합니다.
+        
+        Returns:
+            True if result contains meaningful data, False otherwise
+        """
+        if result is None:
+            return False
+        
+        # 문자열인 경우
+        if isinstance(result, str):
+            # 빈 문자열이나 공백만 있는 경우
+            if not result.strip():
+                return False
+            
+            # JSON 문자열인 경우 파싱 시도
+            try:
+                import json
+                data = json.loads(result)
+                return self._is_meaningful_result(data)
+            except (json.JSONDecodeError, TypeError):
+                # JSON이 아니면 문자열에 내용이 있다고 간주
+                return True
+        
+        # 딕셔너리인 경우
+        if isinstance(result, dict):
+            # 빈 딕셔너리
+            if not result:
+                return False
+            
+            # 일반적인 빈 응답 패턴 체크
+            # {"hits": [], "total": 0} 형태
+            if "hits" in result and isinstance(result["hits"], list):
+                if len(result["hits"]) == 0:
+                    return False
+            
+            # {"data": {"search": {"hits": [], "total": 0}}} 형태
+            if "data" in result:
+                data = result["data"]
+                if isinstance(data, dict):
+                    if "search" in data:
+                        search = data["search"]
+                        if isinstance(search, dict):
+                            if "hits" in search and isinstance(search["hits"], list):
+                                if len(search["hits"]) == 0:
+                                    return False
+            
+            # {"results": []} 형태
+            if "results" in result and isinstance(result["results"], list):
+                if len(result["results"]) == 0:
+                    return False
+            
+            # 재귀적으로 딕셔너리 값 체크
+            for value in result.values():
+                if value is not None and value != "" and value != [] and value != {}:
+                    return True
+            return False
+        
+        # 리스트인 경우
+        if isinstance(result, list):
+            # 빈 리스트
+            if not result:
+                return False
+            # 리스트 내 요소가 모두 빈 값인지 체크
+            return any(self._is_meaningful_result(item) for item in result)
+        
+        # 기타 타입 (숫자, bool 등)은 의미 있는 값으로 간주
+        return True
+
+    def _rank_resolved_tools(
+        self,
+        query: str,
+        resolved_tools: List[ResolvedMCPTool],
+    ) -> List[ResolvedMCPTool]:
+        """Rank tools by relevance to the query using fuzzy matching."""
+        if not query:
+            return resolved_tools
+        
+        ranked: List[Tuple[int, ResolvedMCPTool]] = []
+        query_lower = query.lower()
+        
+        for resolved in resolved_tools:
+            descriptor_parts = [
+                resolved.label,
+                resolved.server_name,
+                getattr(resolved.tool, "name", None),
+                getattr(resolved.tool, "description", None),
+            ]
+            descriptor = " ".join(part for part in descriptor_parts if part)
+            
+            # Fuzzy matching score
+            score = fuzz.partial_ratio(query_lower, descriptor.lower()) if descriptor else 0
+            
+            # 최소 점수 임계값 설정 (너무 낮은 점수는 제외)
+            if score >= 30:  # 30% 이상 매칭되는 도구만 포함
+                ranked.append((score, resolved))
+        
+        # 점수순 정렬
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        
+        # 점수 로깅
+        if ranked:
+            log.info(
+                "Tool ranking completed",
+                extra={
+                    "top_tool": ranked[0][1].label if ranked else None,
+                    "top_score": ranked[0][0] if ranked else None,
+                    "total_ranked": len(ranked),
+                },
+            )
+        
+        return [tool for _, tool in ranked]
 
     def _build_stage_agent_prompt(
         self,
@@ -729,14 +1268,17 @@ class LangGraphSearchAgent:
             f"Stage: {stage_title}\nGoal: {stage_description}\n"
             f"User question: {query}\n"
             f"Available MCP tools:\n{''.join(tool_sections)}\n\n"
-            "Action guidelines:\n"
-            "1. If needed, call one tool at a time using a JSON command.\n"
-            "2. Review each tool output before deciding on additional calls.\n"
-            "3. When done, reply with action=\"finish\" and a summary.\n"
-            "Output examples:\n"
-            '{"action": "call_tool", "tool_name": "tool", "arguments": {"query": "..."}}\n'
-            '{"action": "finish", "summary": "..."}\n'
-            f"Progress so far:\n{history_text}"
+            "IMPORTANT: You MUST call at least one tool to gather data before finishing.\n"
+            "Action guardrails:\n"
+            "1. ALWAYS call relevant tools to gather data - do not skip tool usage.\n"
+            "2. Execute at most 3 distinct tools for this stage. Start with the most relevant tool.\n"
+            "3. Invoke a single tool per step using JSON with proper arguments matching the schema.\n"
+            "4. After gathering tool results, reply with action=\"finish\" and provide a concise summary.\n\n"
+            "Output format (respond ONLY with valid JSON):\n"
+            'For tool call: {"action": "call_tool", "tool_name": "<exact_tool_name>", "arguments": {<schema_fields>}}\n'
+            'For finishing: {"action": "finish", "summary": "<brief summary of findings>"}\n\n'
+            f"Progress so far:\n{history_text}\n\n"
+            "Your response (JSON only):"
         )
 
     # Legacy MCP tool-node helpers (removed)
@@ -863,6 +1405,9 @@ class LangGraphSearchAgent:
         final_message = await self._stream_answer(messages)
         state["messages"].append(final_message)
         state["final_answer"] = final_message.get("content", "")
+        ui_payload = self._build_ui_payload(state)
+        if ui_payload:
+            await self._emit("ui_payload", ui_payload)
         return state
 
     @staticmethod
@@ -947,55 +1492,255 @@ class LangGraphSearchAgent:
         system_prompt: str,
         user_prompt: str,
         temperature: float = 0,
-    ) -> str:
+        tools: Optional[List[Dict[str, Any]]] = None,
+        return_message: bool = False,
+    ) -> Union[str, Any]:
         client = self._client
-        response = await client.chat.completions.create(
-            model=self.model,
-            messages=[
+        
+        request_params = {
+            "model": self.model,
+            "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=temperature,
+            "temperature": temperature,
+        }
+        
+        # tools가 있으면 추가
+        if tools:
+            request_params["tools"] = tools
+            request_params["tool_choice"] = "auto"
+        
+        response = await client.chat.completions.create(**request_params)
+        message = response.choices[0].message
+        tool_call_count = len(getattr(message, "tool_calls", []) or [])
+        log.debug(
+            "LLM call completed",
+            extra={
+                "has_tools": bool(tools),
+                "tool_call_count": tool_call_count,
+                "content_preview": (message.content or "")[:200],
+            },
         )
-        return response.choices[0].message.content or ""
+        if return_message:
+            return message
+        return message.content or ""
 
-    def _initialize_node_mcp_bindings(self) -> Dict[str, Dict[str, Any]]:
-        if resolve_mcp_tool_name is None:
-            return {}
-        bindings: Dict[str, Dict[str, Any]] = {}
-        for node_name, config in self.NODE_MCP_REQUIREMENTS.items():
-            tool_name = resolve_mcp_tool_name(
-                preferred_aliases=config.get("preferred_aliases"),
-                contains_keywords=config.get("contains_keywords"),
-            )
-            if not tool_name:
+    def _build_ui_payload(self, state: GraphState) -> Optional[Dict[str, Any]]:
+        workflow_results: Dict[str, Dict[str, Any]] = state.get("mcp_tool_results", {}) or {}
+        if not workflow_results:
+            return None
+
+        target_name, compound_name = self._infer_target_and_compound(state)
+        structure_panel = self._build_structure_panel(workflow_results, target_name, compound_name)
+        linkage_info = self._build_linkage_info(workflow_results, compound_name, target_name)
+        knowledge_graph = self._build_knowledge_graph_payload(target_name, compound_name)
+        report_cards = self._build_report_cards(state, target_name, compound_name, structure_panel)
+
+        payload: Dict[str, Any] = {}
+        if knowledge_graph:
+            payload["knowledge_graph"] = knowledge_graph
+        if structure_panel:
+            payload["structure_panel"] = structure_panel
+        if linkage_info:
+            payload["linkage"] = linkage_info
+        if report_cards:
+            payload["report_cards"] = report_cards
+        return payload or None
+
+    def _infer_target_and_compound(self, state: GraphState) -> Tuple[str, str]:
+        question = state.get("original_question", "")
+        question_lower = question.lower()
+        target_candidates = [
+            "KRAS",
+            "NRAS",
+            "HRAS",
+            "BRAF",
+            "EGFR",
+            "ALK",
+            "PIK3CA",
+            "TP53",
+            "CDK12",
+            "MET",
+            "RET",
+        ]
+        target_name = next((gene for gene in target_candidates if gene.lower() in question_lower), "Target")
+
+        compound_match = re.search(r"\b([A-Z]{2,}[0-9]{2,}[A-Z0-9]*)\b", question)
+        compound_name = compound_match.group(1) if compound_match else "Lead compound"
+        if compound_name.upper() == target_name.upper():
+            compound_name = "Lead compound"
+        return target_name, compound_name
+
+    def _build_structure_panel(
+        self,
+        workflow_results: Dict[str, Dict[str, Any]],
+        target_name: str,
+        compound_name: str,
+    ) -> Optional[Dict[str, Any]]:
+        stage_payload = (
+            workflow_results.get("StructureAgent")
+            or workflow_results.get("Structureagent")
+            or workflow_results.get("Structure")
+        )
+        text_blob = self._flatten_stage_payload(stage_payload) if stage_payload else ""
+        pdb_url = self._extract_first_match(text_blob, r"https?://[^\s\"']+\.pdb\b")
+        binding_image = self._extract_first_match(text_blob, r"https?://[^\s\"']+\.(?:png|jpg|jpeg)")
+        binding_pocket = "Switch-II pocket" if "switch" in text_blob.lower() else "Active site"
+
+        if not pdb_url:
+            pdb_url = "https://files.rcsb.org/download/8AW3.pdb"
+        pdb_id_match = re.search(r"/([0-9A-Za-z]{4})\.pdb", pdb_url)
+        pdb_id = pdb_id_match.group(1).upper() if pdb_id_match else None
+
+        return {
+            "target": target_name,
+            "compound": compound_name,
+            "bindingPocket": binding_pocket,
+            "pdbUrl": pdb_url,
+            "pdbId": pdb_id,
+            "bindingModeImage": binding_image,
+        }
+
+    def _build_linkage_info(
+        self,
+        workflow_results: Dict[str, Dict[str, Any]],
+        compound_name: str,
+        target_name: str,
+    ) -> Optional[Dict[str, Any]]:
+        stage_payload = (
+            workflow_results.get("ChemAgent")
+            or workflow_results.get("ChemicalAgent")
+            or workflow_results.get("Chem")
+        )
+        if not stage_payload:
+            return {"compound": compound_name, "target": target_name}
+        text_blob = self._flatten_stage_payload(stage_payload)
+        smiles = self._extract_first_match(text_blob, r"SMILES[^A-Za-z0-9]*([A-Za-z0-9@+\-\[\]\(\)=#/\\]{6,})")
+        if smiles:
+            smiles = smiles.strip().strip('"')
+        mechanism = self._extract_first_sentence(text_blob, keywords=("mechanism", "MoA", "mode of action"))
+        references = self._extract_urls(text_blob)
+        payload = {
+            "compound": compound_name,
+            "target": target_name,
+            "smiles": smiles,
+            "mechanism": mechanism,
+            "references": references[:5] if references else None,
+        }
+        return {k: v for k, v in payload.items() if v}
+
+    def _build_knowledge_graph_payload(
+        self,
+        target_name: str,
+        compound_name: str,
+    ) -> Dict[str, Any]:
+        nodes = [
+            {"id": target_name, "label": target_name, "group": "target", "level": 0},
+            {"id": "MAPK", "label": "MAPK Pathway", "group": "pathway", "level": 1},
+            {"id": "PI3K", "label": "PI3K", "group": "pathway", "level": 1},
+            {"id": compound_name, "label": compound_name, "group": "compound", "level": 2},
+            {"id": "MEK", "label": "MEK", "group": "pathway", "level": 2},
+            {"id": "ERK", "label": "ERK", "group": "pathway", "level": 3},
+        ]
+        links = [
+            {"source": target_name, "target": "MAPK", "strength": 0.95},
+            {"source": target_name, "target": "PI3K", "strength": 0.85},
+            {"source": "MAPK", "target": "MEK", "strength": 0.9},
+            {"source": "MEK", "target": "ERK", "strength": 0.9},
+            {"source": compound_name, "target": target_name, "strength": 0.98},
+        ]
+        return {"nodes": nodes, "links": links}
+
+    def _build_report_cards(
+        self,
+        state: GraphState,
+        target_name: str,
+        compound_name: str,
+        structure_panel: Optional[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        final_answer = state.get("final_answer", "") or ""
+        summary = final_answer.split("\n\n")[0].strip() if final_answer else ""
+        primary_card = {
+            "title": f"{target_name} – {compound_name} binding summary",
+            "summary": summary or "Generated from latest MCP workflow run.",
+            "tags": [target_name, compound_name],
+        }
+        media_url = structure_panel.get("bindingModeImage") if structure_panel else None
+        if media_url:
+            primary_card["media"] = [
+                {
+                    "type": "image",
+                    "url": media_url,
+                    "caption": f"Predicted binding pose of {compound_name} against {target_name}",
+                }
+            ]
+        return [primary_card]
+
+    def _flatten_stage_payload(self, stage_payload: Dict[str, Any]) -> str:
+        texts: List[str] = []
+
+        def _collect(value: Any) -> None:
+            if value is None:
+                return
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    _collect(item)
+                return
+            if isinstance(value, dict):
+                try:
+                    texts.append(json.dumps(value, ensure_ascii=False))
+                except Exception:
+                    texts.append(str(value))
+                return
+            texts.append(str(value))
+
+        for entry in stage_payload.values():
+            _collect(entry)
+        return "\n".join(texts)
+
+    @staticmethod
+    def _extract_first_match(text: str, pattern: str) -> Optional[str]:
+        if not text:
+            return None
+        match = re.search(pattern, text, re.IGNORECASE)
+        if not match:
+            return None
+        if match.lastindex:
+            return match.group(1)
+        return match.group(0)
+
+    @staticmethod
+    def _extract_first_sentence(text: str, *, keywords: Tuple[str, ...]) -> Optional[str]:
+        if not text:
+            return None
+        lowered = text.lower()
+        for keyword in keywords:
+            idx = lowered.find(keyword.lower())
+            if idx == -1:
                 continue
-            serving_id = (
-                get_mcp_tool_serving_id(tool_name)
-                if get_mcp_tool_serving_id is not None
-                else None
-            )
-            bindings[node_name] = {
-                "tool_name": tool_name,
-                "serving_id": serving_id,
-            }
-            log.info(
-                "LangGraph node MCP binding configured",
-                extra={
-                    "node": node_name,
-                    "tool": tool_name,
-                    "serving_id": serving_id,
-                },
-            )
-        return bindings
+            snippet = text[idx:]
+            sentence_match = re.match(r"([^\.\n]+)", snippet)
+            if sentence_match:
+                return sentence_match.group(1).strip()
+        return None
 
-    def _get_node_tool_schemas(self, node_name: str) -> Optional[List[Dict[str, Any]]]:
-        if not self._node_mcp_bindings or get_mcp_tools_schemas is None:
-            return None
-        binding = self._node_mcp_bindings.get(node_name)
-        if not binding:
-            return None
-        return get_mcp_tools_schemas([binding["tool_name"]])
+    @staticmethod
+    def _extract_urls(text: str) -> List[str]:
+        if not text:
+            return []
+        return re.findall(r"https?://[^\s\"']+", text)
+
+    def _next_unvisited_agent(self, stage_visits: Dict[str, int]) -> Optional[str]:
+        """Return the first unvisited agent code based on priority order."""
+        for agent_code in self._agent_priority:
+            stage_key = self.MCP_AGENT_TO_STAGE.get(agent_code)
+            if not stage_key:
+                continue
+            if stage_visits.get(stage_key, 0) == 0:
+                return agent_code
+        return None
+        return None
 
     def _detect_professional_keywords(self, question: str) -> bool:
         lowered = question.lower()
@@ -1028,6 +1773,7 @@ class LangGraphSearchAgent:
             "document_results": [],
             "mcp_tool_results": {},
             "workflow_trace": [],
+            "_stage_visit_counts": {},
         }
 
         result_state: GraphState = await self._graph.ainvoke(initial_state)
@@ -1050,8 +1796,13 @@ class LangGraphSearchAgent:
         return await asyncio.to_thread(db.hybrid_search, query)
 
     async def _get_vectordb(self) -> Optional[vectordb]:
+        """VectorDB 인스턴스를 lazy initialization으로 반환"""
         if self._vectordb is not None:
             return self._vectordb
+        
+        # 환경 변수가 없으면 즉시 반환
+        if not self._vectordb_enabled:
+            return None
 
         idx = os.getenv("WEAVIATE_INDEX")
         host = os.getenv("WEAVIATE_HOST", "localhost")
@@ -1060,13 +1811,6 @@ class LangGraphSearchAgent:
         serving_id = int(os.getenv("EMBEDDING_SERVING_ID", "10"))
         token = os.getenv("EMBEDDING_BEARER_TOKEN", "")
         base_url = os.getenv("EMBEDDING_BASE_URL", "https://genos.genon.ai:3443")
-
-        if not idx or not token:
-            log.warning(
-                "Vectordb environment variables are missing; document search will be disabled.",
-                extra={"idx": idx, "has_token": bool(token)},
-            )
-            return None
 
         try:
             self._vectordb = vectordb(
@@ -1078,8 +1822,10 @@ class LangGraphSearchAgent:
                 embedding_bearer_token=token,
                 embedding_genos_url=base_url,
             )
+            log.info("VectorDB initialized successfully")
         except Exception:
             log.exception("Failed to initialize vectordb")
             self._vectordb = None
+            self._vectordb_enabled = False  # 실패 시 재시도 방지
 
         return self._vectordb

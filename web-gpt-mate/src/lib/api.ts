@@ -1,19 +1,43 @@
 // Docker 환경에서는 nginx 프록시를 통해 /api 경로로 접근
 // 개발 환경에서는 환경 변수 또는 기본값 사용
-const API_BASE_URL = (import.meta.env as { VITE_API_BASE_URL?: string }).VITE_API_BASE_URL || '/api';
+const API_BASE_URL = (import.meta.env as { VITE_API_BASE_URL?: string }).VITE_API_BASE_URL || "/api";
+
+type UnknownRecord = Record<string, unknown>;
+
+export type UserInfo = UnknownRecord & {
+  id?: string;
+};
 
 export interface ChatStreamEvent {
   event: string;
-  data: any;
+  data: unknown;
 }
 
 export interface ChatRequest {
   question: string;
   chatId?: string | null;
-  userInfo?: {
-    id?: string;
-    [key: string]: any;
-  } | null;
+  userInfo?: UserInfo | null;
+}
+
+export interface ChatHistoryMessage extends UnknownRecord {
+  role?: string;
+  content?: string;
+}
+
+export interface ChatHistoryResponse {
+  messages?: ChatHistoryMessage[];
+}
+
+export interface McpServerStatus {
+  name: string;
+  status: string;
+  is_active: boolean;
+  tool_count: number;
+  message?: string;
+}
+
+export interface McpStatusResponse {
+  servers: McpServerStatus[];
 }
 
 async function* streamSSE(
@@ -60,7 +84,7 @@ async function* streamSSE(
           try {
             const jsonStr = line.slice(6);
             if (jsonStr.trim()) {
-              const event: ChatStreamEvent = JSON.parse(jsonStr);
+              const event = JSON.parse(jsonStr) as ChatStreamEvent;
               yield event;
             }
           } catch (e) {
@@ -79,7 +103,7 @@ async function* streamSSE(
           try {
             const jsonStr = line.slice(6);
             if (jsonStr.trim()) {
-              const event: ChatStreamEvent = JSON.parse(jsonStr);
+              const event = JSON.parse(jsonStr) as ChatStreamEvent;
               yield event;
             }
           } catch (e) {
@@ -122,7 +146,7 @@ export async function* streamLangGraphChat(
 /**
  * 채팅 히스토리 조회 API
  */
-export async function getChatHistory(chatId: string): Promise<any> {
+export async function getChatHistory(chatId: string): Promise<ChatHistoryResponse> {
   const response = await fetch(`${API_BASE_URL}/chat/history/${chatId}`);
   if (!response.ok) {
     throw new Error(`Failed to get chat history: ${response.status}`);
@@ -149,6 +173,14 @@ export async function checkHealth(): Promise<{ status: string }> {
   const response = await fetch(`${API_BASE_URL}/health`);
   if (!response.ok) {
     throw new Error(`Health check failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function getMcpStatus(): Promise<McpStatusResponse> {
+  const response = await fetch(`${API_BASE_URL}/mcp/status`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch MCP status: ${response.status}`);
   }
   return response.json();
 }
