@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Awaitable, Callable, Dict, List, NotRequired, Optional, Tuple, TypedDict, Union
 
 import re
@@ -903,6 +903,8 @@ class LangGraphSearchAgent:
                         continue
 
                 formatted_result = self._format_tool_result(result, max_chars=400)
+                json_safe_args = self._jsonable(arguments)
+                json_safe_result = self._jsonable(result)
                 scratchpad.append(
                     {
                         "type": "tool",
@@ -919,6 +921,21 @@ class LangGraphSearchAgent:
                     existing_value.append(result)
                 else:
                     stage_results[tool_label] = [existing_value, result]
+                await self._emit(
+                    "tool_use",
+                    {
+                        "stage": stage_key,
+                        "stage_title": stage_title,
+                        "tool_label": tool_label,
+                        "tool_name": resolved.tool.name,
+                        "server_name": resolved.server_name,
+                        "description": getattr(resolved.tool, "description", ""),
+                        "input_args": json_safe_args,
+                        "output_result": json_safe_result,
+                        "output_preview": formatted_result,
+                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                    },
+                )
                 await self._emit(
                     "reasoning",
                     {
@@ -1493,6 +1510,20 @@ class LangGraphSearchAgent:
                 "goto": result.goto,
             }
         return result
+
+    @staticmethod
+    def _jsonable(value: Any) -> Any:
+        try:
+            json.dumps(value, ensure_ascii=False)
+            return value
+        except TypeError:
+            if isinstance(value, dict):
+                return {k: LangGraphSearchAgent._jsonable(v) for k, v in value.items()}
+            if isinstance(value, list):
+                return [LangGraphSearchAgent._jsonable(v) for v in value]
+            if isinstance(value, tuple):
+                return [LangGraphSearchAgent._jsonable(v) for v in value]
+            return str(value)
 
     async def _stream_answer(
         self,

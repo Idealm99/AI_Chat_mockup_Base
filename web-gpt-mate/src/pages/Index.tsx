@@ -13,6 +13,7 @@ import {
   UiPayload,
   KnowledgeGraphData,
   StructurePanelData,
+  ToolLog,
 } from "@/types/chat";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
@@ -54,6 +55,7 @@ const Index = () => {
   );
   const lastPrefillKeyRef = useRef<string | null>(null);
   const skipNextHistoryLoadRef = useRef(false);
+  const stageToolLogsRef = useRef<Record<string, ToolLog[]>>({});
 
   const decodeParam = (value: string) => {
     try {
@@ -218,6 +220,7 @@ const Index = () => {
       isThinking: true,
       references: [],
     };
+    stageToolLogsRef.current = {};
     setMessages((prev) => [...prev, aiMessage]);
 
     try {
@@ -261,12 +264,20 @@ const Index = () => {
           const iteration = payloadRecord && typeof payloadRecord.iteration === "number"
             ? payloadRecord.iteration
             : undefined;
+          const stageKey = payloadRecord && typeof payloadRecord.stage === "string" ? payloadRecord.stage : undefined;
+          const isStageSummary = Boolean(stageKey && Array.isArray((payloadRecord as { results?: unknown }).results));
+          const attachedToolLogs = stageKey && isStageSummary
+            ? (stageToolLogsRef.current[stageKey] ?? [])
+            : undefined;
           const step: ReasoningStep = {
             id: `${aiMessageId}-reason-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
             stage,
             message,
             iteration,
             timestamp: new Date(),
+            stageKey,
+            isStageSummary,
+            toolLogs: attachedToolLogs && attachedToolLogs.length > 0 ? [...attachedToolLogs] : undefined,
           };
           setMessages((prev) =>
             prev.map((msg) =>
@@ -277,6 +288,69 @@ const Index = () => {
                   }
                 : msg
             )
+          );
+        } else if (event.event === "tool_use") {
+          const payload = isRecord(event.data) ? (event.data as Record<string, unknown>) : {};
+          const baseToolName = toStringOrDefault(
+            (payload.tool_label as string) ?? (payload.tool_name as string) ?? (payload.toolName as string),
+            "알 수 없는 도구"
+          );
+          const description = toStringOrDefault((payload.description as string) ?? "");
+          const timestampValue = payload.timestamp as string | undefined;
+          const toolTimestamp = timestampValue ? new Date(timestampValue) : new Date();
+          const inputArgs =
+            payload.input_args ?? payload.inputArgs ?? payload.arguments ?? payload.tool_args ?? null;
+          const outputResult =
+            payload.output_result ?? payload.outputResult ?? payload.result ?? payload.tool_result ?? null;
+          const outputPreview = toStringOrDefault((payload.output_preview as string) ?? "");
+          const stageKeyRaw = toStringOrDefault((payload.stage as string) ?? (payload.stage_key as string) ?? "");
+          const stageTitle = toStringOrDefault(payload.stage_title as string);
+          const serverName = toStringOrDefault(payload.server_name as string);
+
+          const log: ToolLog = {
+            id: `${aiMessageId}-tool-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            name: baseToolName,
+            rawToolName: toStringOrDefault(payload.tool_name as string),
+            description,
+            inputArgs,
+            outputResult,
+            outputPreview,
+            timestamp: toolTimestamp,
+            stageKey: stageKeyRaw || undefined,
+            stageTitle: stageTitle || undefined,
+            serverName: serverName || undefined,
+          };
+
+          if (log.stageKey) {
+            stageToolLogsRef.current[log.stageKey] = [
+              ...(stageToolLogsRef.current[log.stageKey] ?? []),
+              log,
+            ];
+          }
+
+          setMessages((prev) =>
+            prev.map((msg) => {
+              if (msg.id !== aiMessageId) {
+                return msg;
+              }
+              const updatedSteps = (msg.reasoningSteps ?? []).map((step) => {
+                if (!log.stageKey || step.stageKey !== log.stageKey) {
+                  return step;
+                }
+                const existing = step.toolLogs ?? [];
+                if (existing.some((item) => item.id === log.id)) {
+                  return step;
+                }
+                return {
+                  ...step,
+                  toolLogs: [...existing, log],
+                };
+              });
+              return {
+                ...msg,
+                reasoningSteps: updatedSteps,
+              };
+            })
           );
         } else if (event.event === "metadata") {
           console.debug("LangGraph metadata", event.data);
@@ -554,42 +628,6 @@ const Index = () => {
           </div>
 
           <aside className="hidden w-full max-w-sm flex-col gap-5 border-l border-slate-800/70 bg-slate-950/60 p-6 backdrop-blur-xl xl:flex">
-            <section className="rounded-2xl border border-slate-800/60 bg-slate-900/60 p-5">
-              <div className="flex items-center justify-between">
-                <div>
-                  <span className="text-[11px] uppercase tracking-[0.28em] text-cyan-300/80">Reasoning Process</span>
-                  <h3 className="mt-1 text-sm font-semibold text-slate-100">
-                    {activeConversation?.title ?? "현재 대화"}
-                  </h3>
-                </div>
-                <span className="text-xs text-slate-400">{latestReasoning.length} steps</span>
-              </div>
-              <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-800/80">
-                <div
-                  className={cn(
-                    "h-full rounded-full transition-all duration-700",
-                    isLoading ? "w-3/5 animate-pulse bg-cyan-400/80" : "w-full bg-emerald-400/80",
-                  )}
-                />
-              </div>
-              <ul className="mt-4 space-y-3 text-sm text-slate-300/80 overflow-y-auto rounded-xl border border-slate-800/60 bg-slate-900/40 p-2 transition-all duration-200 dark:bg-slate-900/50 max-h-[26rem]">
-                {latestReasoning.length === 0 ? (
-                  <li className="rounded-xl border border-dashed border-slate-800/70 bg-slate-900/50 px-3 py-4 text-center text-xs text-slate-500">
-                    아직 추론 정보가 수집되지 않았습니다.
-                  </li>
-                ) : (
-                  latestReasoning.map((step) => (
-                    <li key={step.id} className="rounded-xl border border-slate-800/80 bg-slate-900/70 px-3 py-2">
-                      <p className="text-xs uppercase tracking-wide text-cyan-200/80">
-                        {step.stage}
-                      </p>
-                      <p className="mt-1 text-sm text-slate-200/90">{step.message}</p>
-                    </li>
-                  ))
-                )}
-              </ul>
-            </section>
-
             <section className="rounded-2xl border border-slate-800/60 bg-slate-900/60 p-5">
               <div className="flex items-center justify-between">
                 <span className="text-[11px] uppercase tracking-[0.28em] text-slate-500">References</span>

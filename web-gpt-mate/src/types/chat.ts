@@ -1,9 +1,27 @@
+export interface ToolLog {
+  id: string;
+  name: string;
+  description?: string;
+  inputArgs?: unknown;
+  outputResult?: unknown;
+  outputPreview?: string;
+  timestamp?: Date;
+  stageKey?: string;
+  stageTitle?: string;
+  serverName?: string;
+  rawToolName?: string;
+}
+
 export interface ReasoningStep {
   id: string;
   stage: string;
   message: string;
   iteration?: number;
   timestamp: Date;
+  toolLog?: ToolLog;
+  stageKey?: string;
+  isStageSummary?: boolean;
+  toolLogs?: ToolLog[];
 }
 
 export interface Message {
