@@ -1,10 +1,9 @@
 import { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
-import { Bot, ChevronDown, Loader2, Sparkles, User, Wrench } from "lucide-react";
+import { Bot, ChevronDown, Loader2, Sparkles, User } from "lucide-react";
 import MarkdownRenderer from "./MarkdownRenderer";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import type { ReasoningStep, DocumentReference, ToolLog } from "@/types/chat";
+import type { ReasoningStep, DocumentReference } from "@/types/chat";
 
 interface ChatMessageProps {
   message: string;
@@ -16,8 +15,6 @@ interface ChatMessageProps {
 }
 const ChatMessage = ({ message, isUser, timestamp, reasoningSteps: _reasoningSteps = [], isThinking = false, references = [] }: ChatMessageProps) => {
   const [referenceOpenState, setReferenceOpenState] = useState<Record<number, boolean>>({});
-  const [isToolModalOpen, setIsToolModalOpen] = useState(false);
-  const [activeToolLog, setActiveToolLog] = useState<ToolLog | null>(null);
   const [reasoningOpen, setReasoningOpen] = useState<boolean>(Boolean(isThinking));
 
   useEffect(() => {
@@ -27,27 +24,6 @@ const ChatMessage = ({ message, isUser, timestamp, reasoningSteps: _reasoningSte
       setReasoningOpen(false);
     }
   }, [isThinking, _reasoningSteps?.length]);
-
-  const openToolLogModal = (log: ToolLog) => {
-    setActiveToolLog(log);
-    setIsToolModalOpen(true);
-  };
-
-  const handleToolModalChange = (open: boolean) => {
-    setIsToolModalOpen(open);
-    if (!open) {
-      setActiveToolLog(null);
-    }
-  };
-
-  const formatToolTimestamp = (timestamp?: Date) => {
-    if (!timestamp) return null;
-    try {
-      return timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    } catch {
-      return null;
-    }
-  };
 
   const toggleReference = (idx: number) => {
     setReferenceOpenState((prev) => ({
@@ -145,45 +121,14 @@ const ChatMessage = ({ message, isUser, timestamp, reasoningSteps: _reasoningSte
                           </div>
                           <div className="mt-1 text-sm text-slate-200/90 whitespace-pre-wrap">{step.message}</div>
                           {step.toolLogs && step.toolLogs.length > 0 && (
-                            <div className="mt-3 flex flex-wrap gap-2">
-                              {step.toolLogs.map((log) => (
-                                <Button
-                                  key={log.id}
-                                  variant="outline"
-                                  size="sm"
-                                  onClick={() => openToolLogModal(log)}
-                                  className="h-auto rounded-full border-cyan-400/50 bg-cyan-500/10 px-3 py-1 text-[11px] font-semibold text-cyan-100 hover:bg-cyan-500/20"
-                                >
-                                  <Wrench className="mr-1.5 h-3.5 w-3.5" />
-                                  <div className="flex flex-col text-left leading-tight">
-                                    <span>{log.name}</span>
-                                    {(log.serverName || log.stageTitle) && (
-                                      <span className="text-[9px] font-normal text-cyan-200/70">
-                                        {[log.serverName, log.stageTitle].filter(Boolean).join(" · ")}
-                                      </span>
-                                    )}
-                                  </div>
-                                </Button>
-                              ))}
-                            </div>
+                            <p className="mt-3 text-[11px] font-medium text-cyan-100/80">
+                              MCP 도구 {step.toolLogs.length}건 실행됨 — 우측 패널의 "사용한 도구 출력" 섹션에서 상세 로그를 확인하세요.
+                            </p>
                           )}
-                          {step.toolLog && (
-                            <div className="mt-2 flex flex-wrap items-center gap-2">
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => openToolLogModal(step.toolLog!)}
-                                className="h-8 rounded-full border-cyan-400/50 bg-cyan-500/10 text-[11px] font-semibold text-cyan-100 hover:bg-cyan-500/20"
-                              >
-                                <Wrench className="mr-1.5 h-3.5 w-3.5" />
-                                {step.toolLog.name}
-                              </Button>
-                              {formatToolTimestamp(step.toolLog.timestamp) && (
-                                <span className="text-[11px] text-slate-400">
-                                  {formatToolTimestamp(step.toolLog.timestamp)} 실행
-                                </span>
-                              )}
-                            </div>
+                          {step.toolLog && !step.toolLogs && (
+                            <p className="mt-2 text-[11px] text-cyan-100/80">
+                              "{step.toolLog.name}" 도구 실행됨 — 세부 정보는 우측 패널에서 확인하세요.
+                            </p>
                           )}
                         </li>
                       ))}
@@ -267,53 +212,6 @@ const ChatMessage = ({ message, isUser, timestamp, reasoningSteps: _reasoningSte
           <User className="h-5 w-5" />
         </div>
       )}
-      <Dialog open={isToolModalOpen} onOpenChange={handleToolModalChange}>
-        <DialogContent className="max-w-2xl border border-slate-800/80 bg-slate-950 text-slate-100">
-          <DialogHeader>
-            <DialogTitle className="text-slate-100">MCP Tool Execution Detail</DialogTitle>
-            <DialogDescription className="text-slate-400">
-              스트리밍 중 호출된 MCP 도구 사용 내역을 확인하세요.
-            </DialogDescription>
-          </DialogHeader>
-          {activeToolLog ? (
-            <div className="space-y-4 text-sm text-slate-200">
-              <div className="rounded-xl border border-slate-800/80 bg-slate-900/60 p-4">
-                <p className="text-xs uppercase tracking-[0.3em] text-cyan-200/70">Tool</p>
-                <p className="mt-1 text-lg font-semibold text-slate-50">{activeToolLog.name}</p>
-                {activeToolLog.description && (
-                  <p className="mt-1 text-slate-300">{activeToolLog.description}</p>
-                )}
-                <div className="mt-2 flex flex-wrap gap-3 text-[11px] text-slate-400">
-                  {activeToolLog.stageTitle && <span>Stage: {activeToolLog.stageTitle}</span>}
-                  {activeToolLog.serverName && <span>Server: {activeToolLog.serverName}</span>}
-                </div>
-                {formatToolTimestamp(activeToolLog.timestamp) && (
-                  <p className="mt-2 text-xs text-slate-400">실행 시각: {formatToolTimestamp(activeToolLog.timestamp)} </p>
-                )}
-              </div>
-              <div className="rounded-xl border border-slate-800/80 bg-slate-900/50 p-4">
-                <p className="text-xs uppercase tracking-[0.28em] text-slate-500">Input Arguments</p>
-                <pre className="mt-2 max-h-60 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-950/60 p-3 text-xs text-slate-200">
-                  {JSON.stringify(activeToolLog.inputArgs ?? "<empty>", null, 2)}
-                </pre>
-              </div>
-              <div className="rounded-xl border border-slate-800/80 bg-slate-900/50 p-4">
-                <p className="text-xs uppercase tracking-[0.28em] text-slate-500">Output Result</p>
-                {activeToolLog.outputPreview && (
-                  <p className="mt-2 rounded-lg border border-slate-800/60 bg-slate-950/40 p-3 text-xs text-emerald-200/80">
-                    {activeToolLog.outputPreview}
-                  </p>
-                )}
-                <pre className="mt-2 max-h-60 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-950/60 p-3 text-xs text-emerald-200">
-                  {JSON.stringify(activeToolLog.outputResult ?? "<empty>", null, 2)}
-                </pre>
-              </div>
-            </div>
-          ) : (
-            <p className="text-sm text-slate-400">선택된 도구 정보가 없습니다.</p>
-          )}
-        </DialogContent>
-      </Dialog>
     </div>
   );
 };

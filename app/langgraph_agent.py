@@ -94,19 +94,13 @@ class LangGraphSearchAgent:
 
     """LangGraph-powered conversational search agent with streaming reasoning events."""
 
-    MAX_STAGE_AGENT_STEPS = 4
-    MAX_WORKFLOW_ITERATIONS = 8
-    MAX_STAGE_AGENT_TOOLS = 3
+    MAX_STAGE_AGENT_STEPS = 6
+    MAX_WORKFLOW_ITERATIONS = 10
+    MAX_STAGE_AGENT_TOOLS = 5
     FALLBACK_TOOL_LIMIT = 1
+    DEFAULT_RECURSION_LIMIT = 50
 
-    # NOTE: NODE_MCP_REQUIREMENTS는 레거시 설정으로, 현재 워크플로우에서는 사용되지 않음
-    # 실제 MCP 서버 바인딩은 WORKFLOW_DEFINITION의 tool_names를 통해 이루어짐
-    # NODE_MCP_REQUIREMENTS = {
-    #     "mcp_combined": {
-    #         "preferred_aliases": ["alphafold", "pdb", "alphafold-server", "pdb-server","AlphaFold-MCP-Server","PDB-MCP-Server"],
-    #         "contains_keywords": ["alphafold", "pdb", "structure", "protein"],
-    #     }
-    # }
+ 
 
     PROFESSIONAL_KEYWORDS = [
         "약", "단백질", "임상", "유전자", "화합물", "구조", "신약", "바이오", "의약", "임상시험",
@@ -133,7 +127,7 @@ class LangGraphSearchAgent:
             "key": "chem_agent",
             "title": "ChemAgent",
             "description": "Collect compounds acting on the pathway together with their activity data.",
-            "tool_names": ("ChEMBL-MCP-Server",),
+            "tool_names": ("ChEMBL-MCP-Server", "PubChem-MCP-Server"),
         },
         {
             "key": "structure_agent",
@@ -154,6 +148,7 @@ class LangGraphSearchAgent:
         "CD": "chem_agent",
         "SA": "structure_agent",
         "PI": "pathway_agent",
+        "CL": "clinical_agent",
     }
     MCP_AGENT_CHOICES: Tuple[str, ...] = (*MCP_AGENT_TO_STAGE.keys(), "AG")
 
@@ -227,6 +222,7 @@ class LangGraphSearchAgent:
         graph.add_node("search_query", self._search_query_node)
         graph.add_node("vector_search", self._vector_search_node)
         graph.add_node("final_answer", self._final_answer_node)
+        graph.add_node("ag_cl_stage", self._ag_cl_stage_node)
 
         # Entry point
         graph.set_entry_point("router")
@@ -242,7 +238,7 @@ class LangGraphSearchAgent:
         # MCP Classify 분기: AG (RAG) vs MCP Execution
         def classify_mcp_branch(state: GraphState):
             if state.get("next", "").upper() == "AG":
-                return "search_query"
+                return "ag_cl_stage"
             return "mcp_execution"
         graph.add_conditional_edges("classify_mcp", classify_mcp_branch)
 
@@ -268,6 +264,7 @@ class LangGraphSearchAgent:
         # RAG 검색 플로우
         graph.add_edge("search_query", "vector_search")
         graph.add_edge("vector_search", "final_answer")
+        graph.add_edge("ag_cl_stage", "search_query")
 
         # 종료 노드
         graph.add_conditional_edges("final_answer", lambda _: END)
@@ -429,9 +426,10 @@ class LangGraphSearchAgent:
             "PI": "PathwayAgent - Signaling pathway analysis",
             "CD": "ChemAgent - Compound activity data",
             "SA": "StructureAgent - 3D structure & binding prediction",
+            "CL": "ClinicalAgent - Clinical/regulatory data review",
             "AG": "RAG Search - Document retrieval and synthesis"
         }
-        
+
         format_choices = ", ".join(self.MCP_AGENT_CHOICES)
         visited_info = ", ".join(visited_stages) if visited_stages else "None"
         pending_info = ", ".join(unvisited_agents) if unvisited_agents else "None"
@@ -441,6 +439,7 @@ class LangGraphSearchAgent:
             "You are a biomedical workflow router. Based on the user's question, "
             "select the MOST CRITICAL next agent to call. Each agent handles a specific analysis stage:\n"
             + "\n".join(f"- {code}: {desc}" for code, desc in agent_descriptions.items())
+            + "\nIMPORTANT: If you choose AG, ClinicalAgent must run immediately before entering the vector search path."
         )
         
         user_prompt = (
@@ -500,7 +499,14 @@ class LangGraphSearchAgent:
         state["next"] = next_choice
         state["rationale"] = rationale
         state["_classify_mcp_raw"] = raw_response
-        
+        agent_label = agent_descriptions.get(next_choice, next_choice)
+        next_step_text = f"{agent_label} ({next_choice})" if agent_label != next_choice else next_choice
+        reason_text = rationale.strip() if rationale else "모델 판단에 따른 자동 선택입니다."
+        reasoning_message = (
+            f"다음 단계: {next_step_text}\n"
+            f"선택 이유: {reason_text}"
+        )
+
         self._append_history(
             state,
             "system",
@@ -510,7 +516,7 @@ class LangGraphSearchAgent:
             "reasoning",
             {
                 "stage": "classify_mcp",
-                "message": f"Next agent: {next_choice}. Rationale: {rationale}"[:1000],
+                "message": reasoning_message,
             },
         )
         return state
@@ -538,6 +544,43 @@ class LangGraphSearchAgent:
         if stage_key:
             stage_visits[stage_key] = stage_visits.get(stage_key, 0) + 1
         state["_last_mcp_stage"] = stage_key
+        return state
+
+    async def _ag_cl_stage_node(self, state: GraphState) -> GraphState:
+        stage_key = "clinical_agent"
+        stage_func = self._workflow_stage_functions.get(stage_key)
+        stage_visits = state.setdefault("_stage_visit_counts", {})
+        already_visited = stage_visits.get(stage_key, 0) > 0
+
+        if stage_func is None:
+            await self._emit(
+                "reasoning",
+                {
+                    "stage": stage_key,
+                    "message": "ClinicalAgent stage is unavailable; skipping before AG.",
+                },
+            )
+            return state
+
+        if not already_visited:
+            await stage_func(state)
+            stage_visits[stage_key] = stage_visits.get(stage_key, 0) + 1
+            state["_last_mcp_stage"] = stage_key
+            await self._emit(
+                "reasoning",
+                {
+                    "stage": stage_key,
+                    "message": "ClinicalAgent stage executed before AG vector search.",
+                },
+            )
+        else:
+            await self._emit(
+                "reasoning",
+                {
+                    "stage": stage_key,
+                    "message": "ClinicalAgent stage already visited; AG will proceed to vector search.",
+                },
+            )
         return state
 
     @staticmethod
@@ -772,6 +815,22 @@ class LangGraphSearchAgent:
         used_tools: List[str] = []
         summary = ""
 
+        # 상세 로깅: PubChem 도구 로드 여부 확인
+        tool_names = [resolved.tool.name for resolved in resolved_tools]
+        server_names = [resolved.server_name for resolved in resolved_tools]
+        pubchem_tools = [name for name in tool_names if 'pubchem' in name.lower()]
+        log.info(
+            f"_run_stage_agent 시작: {stage_title}",
+            extra={
+                "stage_key": stage_key,
+                "total_tools_loaded": len(resolved_tools),
+                "tool_names": tool_names,
+                "server_names": server_names,
+                "pubchem_found": len(pubchem_tools) > 0,
+                "pubchem_tools": pubchem_tools,
+            },
+        )
+
         for step in range(self.MAX_STAGE_AGENT_STEPS):
             agent_instruction = self._build_stage_agent_prompt(
                 stage_title=stage_title,
@@ -785,6 +844,14 @@ class LangGraphSearchAgent:
             tools_schema = self._convert_tools_to_openai_schema(resolved_tools)
             
             use_tool_schema = bool(tools_schema)
+            log.info(
+                f"Step {step}: LLM 호출 준비",
+                extra={
+                    "stage": stage_key,
+                    "tools_schema_count": len(tools_schema) if tools_schema else 0,
+                    "use_tool_schema": use_tool_schema,
+                },
+            )
             response_payload = await self._simple_llm_call(
                 system_prompt=(
                     f"You are the specialist agent for the {stage_title} stage. "
@@ -804,9 +871,20 @@ class LangGraphSearchAgent:
             else:
                 response_text = response_payload or ""
 
+            # 상세 로깅: tool_calls 생성 여부 및 응답 분석
+            log.info(
+                f"Step {step}: LLM 응답 분석",
+                extra={
+                    "stage": stage_key,
+                    "tool_calls_count": len(tool_calls) if tool_calls else 0,
+                    "response_text_length": len(response_text) if response_text else 0,
+                    "response_text_preview": (response_text or "")[:300],
+                },
+            )
+
             if tool_calls:
                 log.info(
-                    "LLM requested MCP tool via function call",
+                    f"Step {step}: LLM이 도구 호출 결정",
                     extra={
                         "stage": stage_key,
                         "tool_name": tool_calls[0].function.name if tool_calls[0].function else None,
@@ -830,6 +908,13 @@ class LangGraphSearchAgent:
                     "arguments": arguments,
                 }
             else:
+                log.info(
+                    f"Step {step}: LLM이 도구 호출하지 않음 - 텍스트 응답으로 파싱 시도",
+                    extra={
+                        "stage": stage_key,
+                        "response_sample": (response_text or "")[:200],
+                    },
+                )
                 try:
                     decision = json.loads(response_text or "{}")
                 except json.JSONDecodeError:
@@ -1837,7 +1922,10 @@ class LangGraphSearchAgent:
             "_stage_visit_counts": {},
         }
 
-        result_state: GraphState = await self._graph.ainvoke(initial_state)
+        result_state: GraphState = await self._graph.ainvoke(
+            initial_state,
+            config={"recursion_limit": self.DEFAULT_RECURSION_LIMIT},
+        )
         return result_state
 
     def _system_prompt(self) -> str:

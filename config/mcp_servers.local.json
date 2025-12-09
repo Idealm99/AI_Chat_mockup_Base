@@ -47,6 +47,10 @@
     {
       "name": "Reactome-MCP-Server",
       "cwd": "../app/mcp/Reactome-MCP-Server"
-    }
-  ]
+    },
+      {
+        "name": "PubChem-MCP-Server",
+        "cwd": "../app/mcp/PubChem-MCP-Server"
+      }
+    ]
 }

@@ -62,12 +62,16 @@ async def _get_genos_token_async() -> str:
             return data["data"]["access_token"]
 
 
+def _get_openrouter_base_url() -> str:
+    return os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
+
+
 def _get_openai_client() -> AsyncOpenAI:
     """OpenAI 클라이언트 반환 (GenOS 미사용 시)"""
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY 환경 변수가 설정되지 않았습니다.")
-    return AsyncOpenAI(api_key=api_key)
+        raise RuntimeError("OPENROUTER_API_KEY 환경 변수가 설정되지 않았습니다.")
+    return AsyncOpenAI(api_key=api_key, base_url=_get_openrouter_base_url())
 
 
 def _get_default_model() -> str:

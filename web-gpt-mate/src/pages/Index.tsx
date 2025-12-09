@@ -19,6 +19,7 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import KnowledgeGraphPanel from "@/components/KnowledgeGraphPanel";
 import ProteinStructurePanel from "@/components/ProteinStructurePanel";
+import ToolUsagePanel from "@/components/ToolUsagePanel";
 
 const TEMPLATE_PROMPTS = [
   "위암(고형암)에 대한 신약 후보를 찾아줘",
@@ -27,6 +28,20 @@ const TEMPLATE_PROMPTS = [
   "알츠하이머 조기 진단을 위한 혈액 내 바이오마커 후보는?",
   "BRCA1 변이 단백질 구조에 딱 맞는 리간드를 설계해줘.",
 ];
+
+const STAGE_FLOW = [
+  { stageKey: "target_agent", code: "TV", title: "TargetAgent" },
+  { stageKey: "chem_agent", code: "CD", title: "ChemAgent" },
+  { stageKey: "structure_agent", code: "SA", title: "StructureAgent" },
+  { stageKey: "pathway_agent", code: "PI", title: "PathwayAgent" },
+  { stageKey: "clinical_agent", code: "CL", title: "ClinicalAgent" },
+] as const;
+
+type StagePriorityMeta = { stageKey: string; code: string; title: string; order: number };
+
+const STAGE_PRIORITY_MAP: Map<string, StagePriorityMeta> = new Map(
+  STAGE_FLOW.map((meta, index) => [meta.stageKey, { ...meta, order: index }]),
+);
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
@@ -535,7 +550,10 @@ const Index = () => {
     [messages],
   );
 
-  const latestReasoning = latestAssistantMessage?.reasoningSteps ?? [];
+  const latestReasoning = useMemo(
+    () => latestAssistantMessage?.reasoningSteps ?? [],
+    [latestAssistantMessage],
+  );
   const latestReferences = latestAssistantMessage?.references ?? [];
   const knowledgeGraphData = useMemo<KnowledgeGraphData | null>(
     () => uiPayload?.knowledge_graph ?? uiPayload?.knowledgeGraph ?? null,
@@ -545,6 +563,86 @@ const Index = () => {
     () => uiPayload?.structure_panel ?? uiPayload?.structurePanel ?? null,
     [uiPayload],
   );
+  const toolUsageGroups = useMemo(() => {
+    type LogWithPosition = ToolLog & { __position: number };
+    const rawLogs = latestReasoning
+      .flatMap((step) => step.toolLogs ?? [])
+      .filter((log): log is ToolLog => Boolean(log));
+    if (rawLogs.length === 0) {
+      return [];
+    }
+    const dedupedLogs: LogWithPosition[] = [];
+    const seenKeys = new Set<string>();
+    rawLogs.forEach((log, index) => {
+      const dedupeKey =
+        log.id || `${log.stageKey ?? "_"}-${log.name ?? log.rawToolName ?? "tool"}-${log.timestamp?.toISOString() ?? index}`;
+      if (seenKeys.has(dedupeKey)) {
+        return;
+      }
+      seenKeys.add(dedupeKey);
+      dedupedLogs.push({ ...log, __position: index });
+    });
+    if (dedupedLogs.length === 0) {
+      return [];
+    }
+    let fallbackOrder = STAGE_FLOW.length;
+    const grouped = new Map<
+      string,
+      {
+        meta: { stageKey: string; code: string; title: string; order: number };
+        logs: LogWithPosition[];
+      }
+    >();
+
+    dedupedLogs.forEach((log) => {
+      const stageKey = log.stageKey || "__unknown_stage__";
+      const knownMeta = STAGE_PRIORITY_MAP.get(stageKey);
+      const fallbackTitle = log.stageTitle || log.serverName || "기타 단계";
+      const fallbackCode = (log.stageTitle || stageKey || "STEP").slice(0, 2).toUpperCase();
+      const meta = knownMeta ?? {
+        stageKey,
+        code: fallbackCode,
+        title: fallbackTitle,
+        order: fallbackOrder++,
+      };
+      const existing = grouped.get(stageKey) ?? { meta, logs: [] };
+      existing.logs.push(log);
+      grouped.set(stageKey, existing);
+    });
+
+    return Array.from(grouped.values())
+      .map((entry) => {
+        const sortedLogs = [...entry.logs]
+          .sort((a, b) => {
+            const timeA = a.timestamp?.getTime() ?? Number.MAX_SAFE_INTEGER;
+            const timeB = b.timestamp?.getTime() ?? Number.MAX_SAFE_INTEGER;
+            if (timeA !== timeB) {
+              return timeA - timeB;
+            }
+            return a.__position - b.__position;
+          })
+          .map(({ __position, ...rest }) => rest);
+        const firstTimestamp = sortedLogs[0]?.timestamp?.getTime() ?? Number.MAX_SAFE_INTEGER;
+        return {
+          stageKey: entry.meta.stageKey,
+          code: entry.meta.code,
+          title: entry.meta.title,
+          logs: sortedLogs,
+          order: entry.meta.order,
+          firstTimestamp,
+        };
+      })
+      .sort((a, b) => {
+        if (a.firstTimestamp !== b.firstTimestamp) {
+          return a.firstTimestamp - b.firstTimestamp;
+        }
+        if (a.order !== b.order) {
+          return a.order - b.order;
+        }
+        return a.stageKey.localeCompare(b.stageKey);
+      })
+      .map(({ order, firstTimestamp, ...rest }) => rest);
+  }, [latestReasoning]);
   const streamingStatusLabel = isLoading
     ? "Streaming"
     : isLoadingHistory
@@ -650,6 +748,8 @@ const Index = () => {
                 )}
               </ul>
             </section>
+
+            <ToolUsagePanel groups={toolUsageGroups} isActive={hasCompletedAssistantResponse} />
 
             <KnowledgeGraphPanel isActive={hasCompletedAssistantResponse} data={knowledgeGraphData ?? undefined} />
 

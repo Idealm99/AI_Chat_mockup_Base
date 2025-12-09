@@ -27,17 +27,60 @@ class embedding_serving:
     def call(self, question: str = '안녕?'):
         body = {"input": [question]}
         endpoint = f"{self.url}/v1/embeddings"
-        response = requests.post(endpoint, headers=self.headers, json=body)
-        result = response.json()
-        return result.get('data', [])
+        
+        try:
+            response = requests.post(endpoint, headers=self.headers, json=body)
+            
+            # [수정 1] 상태 코드가 200이 아니면 에러 로그 출력 후 빈 리스트 반환
+            if response.status_code != 200:
+                logger.error(
+                    f"Embedding API Error: Status {response.status_code}", 
+                    extra={"response_text": response.text, "endpoint": endpoint}
+                )
+                return []
+
+            # [수정 2] JSON 파싱 시도
+            result = response.json()
+            return result.get('data', [])
+
+        except requests.exceptions.JSONDecodeError:
+            # [수정 3] JSON 형식이 아닌 응답(HTML 에러 등)이 왔을 때 원본 텍스트 확인
+            logger.error(
+                "Failed to decode JSON from Embedding API (Invalid Format)", 
+                extra={"raw_response": response.text}
+            )
+            return []
+        except Exception as e:
+            logger.error("Unexpected error in embedding call", extra={"error": str(e)})
+            return []
     
     def call_batch(self, question: Optional[List[str]] = None):
         inputs = question or ['안녕?']
         body = {"input": inputs}
         endpoint = f"{self.url}/v1/embeddings"
-        response = requests.post(endpoint, headers=self.headers, json=body)
-        result = response.json()
-        return result.get('data', [])
+        
+        try:
+            response = requests.post(endpoint, headers=self.headers, json=body)
+
+            if response.status_code != 200:
+                logger.error(
+                    f"Embedding Batch API Error: Status {response.status_code}", 
+                    extra={"response_text": response.text}
+                )
+                return []
+                
+            result = response.json()
+            return result.get('data', [])
+
+        except requests.exceptions.JSONDecodeError:
+            logger.error(
+                "Failed to decode JSON from Embedding Batch API", 
+                extra={"raw_response": response.text}
+            )
+            return []
+        except Exception as e:
+            logger.error("Unexpected error in embedding batch call", extra={"error": str(e)})
+            return []
     
     async def async_call(self, question: str = '안녕?'):
         body = {"input": question}
@@ -45,15 +88,27 @@ class embedding_serving:
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
                 response = await client.post(endpoint, headers=self.headers, json=body)
+                
+                # [수정 4] Async 호출에서도 상태 코드 확인
+                if response.status_code != 200:
+                    logger.error(
+                        f"Async Embedding API Error: Status {response.status_code}", 
+                        extra={"response_text": response.text}
+                    )
+                    return []
+
                 result = response.json()
                 return result.get('data', [])
 
         except KeyError as e:
             logger.error("Unexpected response format from embedding serving", extra={"error": str(e)})
-            return None
+            return []
         except httpx.RequestError as e:
             logger.error("Embedding serving request error", extra={"error": str(e)})
-            return None
+            return []
+        except Exception as e: # JSON decode error 등 포괄 처리
+            logger.error("Async embedding call failed", extra={"error": str(e)})
+            return []
     
     async def async_call_batch(self, question: Optional[List[str]] = None):
         inputs = question or ['안녕?']
@@ -62,15 +117,26 @@ class embedding_serving:
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
                 response = await client.post(endpoint, headers=self.headers, json=body)
+                
+                if response.status_code != 200:
+                    logger.error(
+                        f"Async Batch Embedding API Error: Status {response.status_code}", 
+                        extra={"response_text": response.text}
+                    )
+                    return []
+
                 result = response.json()
                 return result.get('data', [])
 
         except KeyError as e:
             logger.error("Unexpected response format from embedding serving", extra={"error": str(e)})
-            return None
+            return []
         except httpx.RequestError as e:
             logger.error("Embedding serving request error", extra={"error": str(e)})
-            return None
+            return []
+        except Exception as e:
+            logger.error("Async batch embedding call failed", extra={"error": str(e)})
+            return []
     
 class vectordb:
     def __init__(self, genos_ip:str = None, 
