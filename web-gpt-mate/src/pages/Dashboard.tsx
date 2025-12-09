@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import type { LucideIcon } from "lucide-react";
 import {
   Search,
   Activity,
@@ -14,10 +15,62 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { getMcpStatus, McpServerStatus } from "@/lib/api";
+
+const FALLBACK_AGENTS = [
+  { name: "OpenTargets", status: "active", icon: Target },
+  { name: "AlphaFold", status: "active", icon: Dna },
+  { name: "ChEMBL", status: "inactive", icon: Pill },
+  { name: "Reactome", status: "active", icon: Network },
+  { name: "UniProt", status: "active", icon: Database },
+  { name: "PubChem", status: "inactive", icon: Pill },
+  { name: "DrugBank", status: "active", icon: Pill },
+  { name: "STRING", status: "active", icon: Network },
+] as const;
+
+const MCP_ICON_MAP: Record<string, LucideIcon> = {
+  OpenTargets: Target,
+  "OpenTargets-MCP-Server": Target,
+  AlphaFold: Dna,
+  "AlphaFold-MCP-Server": Dna,
+  ChEMBL: Pill,
+  "ChEMBL-MCP-Server": Pill,
+  Reactome: Network,
+  "Reactome-MCP-Server": Network,
+  UniProt: Database,
+  "UniProt-MCP-Server": Database,
+  PubChem: Pill,
+  "PubChem-MCP-Server": Pill,
+  DrugBank: Pill,
+  "DrugBank-MCP-Server": Pill,
+  STRING: Network,
+  "STRING-MCP-Server": Network,
+  KEGG: Network,
+  "KEGG-MCP-Server": Network,
+  GeneOntology: Network,
+  "GeneOntology-MCP-Server": Network,
+  ClinicalTrials: FileText,
+  "ClinicalTrials-MCP-Server": FileText,
+  OpenFDA: FileText,
+  "OpenFDA-MCP-Server": FileText,
+  PDB: Database,
+  "PDB-MCP-Server": Database,
+};
+
+type DisplayAgent = {
+  key: string;
+  label: string;
+  Icon: LucideIcon;
+  isActive: boolean;
+  statusText: string;
+  detail?: string;
+};
 
 const Dashboard = () => {
   const navigate = useNavigate();
   const [searchQuery, setSearchQuery] = useState("");
+  const [agentStatuses, setAgentStatuses] = useState<McpServerStatus[]>([]);
+  const [isLoadingAgents, setIsLoadingAgents] = useState(false);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -34,16 +87,66 @@ const Dashboard = () => {
     navigate(`/chat?project=${encodeURIComponent(projectId)}`);
   };
 
-  const agents = [
-    { name: "OpenTargets", status: "active", icon: Target },
-    { name: "AlphaFold", status: "active", icon: Dna },
-    { name: "ChEMBL", status: "syncing", icon: Pill },
-    { name: "Reactome", status: "active", icon: Network },
-    { name: "UniProt", status: "active", icon: Database },
-    { name: "PubChem", status: "syncing", icon: Pill },
-    { name: "DrugBank", status: "active", icon: Pill },
-    { name: "STRING", status: "active", icon: Network },
-  ] as const;
+  useEffect(() => {
+    let isMounted = true;
+
+    const fetchStatuses = async () => {
+      setIsLoadingAgents(true);
+      try {
+        const response = await getMcpStatus();
+        if (isMounted) {
+          setAgentStatuses(response.servers ?? []);
+        }
+      } catch (error) {
+        console.error("Failed to load MCP status", error);
+        if (isMounted) {
+          setAgentStatuses([]);
+        }
+      } finally {
+        if (isMounted) {
+          setIsLoadingAgents(false);
+        }
+      }
+    };
+
+    void fetchStatuses();
+    const intervalId = window.setInterval(() => void fetchStatuses(), 60000);
+
+    return () => {
+      isMounted = false;
+      window.clearInterval(intervalId);
+    };
+  }, []);
+
+  const formatServerName = (name: string) =>
+    name.replace(/-MCP-Server$/i, "").replace(/_/g, " ");
+
+  const displayAgents = useMemo<DisplayAgent[]>(() => {
+    if (!agentStatuses.length) {
+      return FALLBACK_AGENTS.map((agent) => ({
+        key: agent.name,
+        label: agent.name,
+        Icon: agent.icon,
+        isActive: agent.status === "active",
+        statusText: agent.status === "active" ? "Active" : "Offline",
+      }));
+    }
+
+    return agentStatuses.map((status) => {
+      const label = formatServerName(status.name);
+      const Icon = MCP_ICON_MAP[status.name] ?? MCP_ICON_MAP[label] ?? Activity;
+      const isActive = Boolean(status.is_active);
+      const statusText = isActive ? "Active" : status.status === "idle" ? "Idle" : "Offline";
+      return {
+        key: status.name,
+        label,
+        Icon,
+        isActive,
+        statusText,
+        detail: status.tool_count ? `${status.tool_count} tools` : status.message,
+      };
+    });
+  }, [agentStatuses]);
 
   const insights = [
     { title: "New KRAS pathway discovered in pancreatic cancer", time: "2h ago", icon: Activity },
@@ -154,30 +257,41 @@ const Dashboard = () => {
               MCP Agent Monitor
             </h3>
             <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-              {agents.map((agent) => (
+              {displayAgents.map((agent) => (
                 <div
-                  key={agent.name}
-                  className="glass-card-hover flex cursor-pointer flex-col items-center gap-2 rounded-xl p-4"
+                  key={agent.key}
+                  className="glass-card-hover relative flex cursor-pointer flex-col items-center gap-2 rounded-xl p-4"
+                  title={agent.detail ?? agent.statusText}
                 >
-                  <agent.icon className="h-8 w-8 text-primary" />
-                  <span className="text-center text-sm font-medium text-foreground">{agent.name}</span>
-                  <div className="flex items-center gap-1">
+                  {agent.isActive && (
+                    <span
+                      className="absolute left-3 top-1/2 hidden -translate-y-1/2 md:flex"
+                      aria-hidden="true"
+                    >
+                      <span className="status-pulse h-2.5 w-2.5 rounded-full bg-status-active shadow-[0_0_8px_rgba(16,185,129,0.8)]" />
+                    </span>
+                  )}
+                  <agent.Icon className="h-8 w-8 text-primary" />
+                  <span className="text-center text-sm font-medium text-foreground">{agent.label}</span>
+                  <div className="flex items-center gap-2 text-xs">
                     <div
                       className={`status-pulse h-2 w-2 rounded-full ${
-                        agent.status === "active" ? "bg-status-active glow-emerald" : "bg-status-warning"
+                        agent.isActive ? "bg-status-active glow-emerald" : "bg-red-500/80"
                       }`}
                     />
-                    <span
-                      className={`text-xs ${
-                        agent.status === "active" ? "text-status-active" : "text-status-warning"
-                      }`}
-                    >
-                      {agent.status === "active" ? "Active" : "Syncing"}
+                    <span className={agent.isActive ? "text-status-active" : "text-red-300"}>
+                      {agent.statusText}
                     </span>
                   </div>
+                  {!agent.isActive && agent.detail && (
+                    <p className="text-center text-[11px] text-red-300/80">{agent.detail}</p>
+                  )}
                 </div>
               ))}
             </div>
+            <p className="mt-3 text-xs text-muted-foreground">
+              {isLoadingAgents ? "Checking MCP servers..." : "Statuses refresh every 60s."}
+            </p>
           </div>
 
           <div className="col-span-12 rounded-2xl glass-card p-6 fade-in lg:col-span-4">

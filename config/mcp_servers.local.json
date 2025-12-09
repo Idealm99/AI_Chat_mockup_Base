@@ -1,0 +1,56 @@
+{
+  "defaults": {
+    "transport": "stdio",
+    "command": "node",
+    "args": [
+      "build/index.js"
+    ],
+    "env": {
+      "NODE_ENV": "production"
+    },
+    "encoding": "utf-8",
+    "encoding_error_handler": "strict"
+  },
+  "servers": [
+    {
+      "name": "AlphaFold-MCP-Server",
+      "cwd": "../app/mcp/AlphaFold-MCP-Server"
+    },
+    {
+      "name": "ChEMBL-MCP-Server",
+      "cwd": "../app/mcp/ChEMBL-MCP-Server"
+    },
+    {
+      "name": "ClinicalTrials-MCP-Server",
+      "cwd": "../app/mcp/ClinicalTrials-MCP-Server"
+    },
+    {
+      "name": "GeneOntology-MCP-Server",
+      "cwd": "../app/mcp/GeneOntology-MCP-Server"
+    },
+    {
+      "name": "KEGG-MCP-Server",
+      "cwd": "../app/mcp/KEGG-MCP-Server"
+    },
+    {
+      "name": "OpenFDA-MCP-Server",
+      "cwd": "../app/mcp/OpenFDA-MCP-Server"
+    },
+    {
+      "name": "OpenTargets-MCP-Server",
+      "cwd": "../app/mcp/OpenTargets-MCP-Server"
+    },
+    {
+      "name": "PDB-MCP-Server",
+      "cwd": "../app/mcp/PDB-MCP-Server"
+    },
+    {
+      "name": "Reactome-MCP-Server",
+      "cwd": "../app/mcp/Reactome-MCP-Server"
+    },
+      {
+        "name": "PubChem-MCP-Server",
+        "cwd": "../app/mcp/PubChem-MCP-Server"
+      }
+    ]
+}

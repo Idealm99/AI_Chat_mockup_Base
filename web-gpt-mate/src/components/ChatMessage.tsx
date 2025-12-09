@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
 import { Bot, ChevronDown, Loader2, Sparkles, User } from "lucide-react";
 import MarkdownRenderer from "./MarkdownRenderer";
@@ -15,6 +15,15 @@ interface ChatMessageProps {
 }
 const ChatMessage = ({ message, isUser, timestamp, reasoningSteps: _reasoningSteps = [], isThinking = false, references = [] }: ChatMessageProps) => {
   const [referenceOpenState, setReferenceOpenState] = useState<Record<number, boolean>>({});
+  const [reasoningOpen, setReasoningOpen] = useState<boolean>(Boolean(isThinking));
+
+  useEffect(() => {
+    if (isThinking) {
+      setReasoningOpen(true);
+    } else if ((_reasoningSteps?.length ?? 0) > 0) {
+      setReasoningOpen(false);
+    }
+  }, [isThinking, _reasoningSteps?.length]);
 
   const toggleReference = (idx: number) => {
     setReferenceOpenState((prev) => ({
@@ -67,6 +76,71 @@ const ChatMessage = ({ message, isUser, timestamp, reasoningSteps: _reasoningSte
                   {isThinking ? "Analyzing knowledge graph..." : "Insight synthesized"}
                 </span>
               </div>
+              {/* Live reasoning steps with collapsible container */}
+              {(_reasoningSteps?.length ?? 0) > 0 && (
+                <div className="my-2 rounded-xl border border-slate-800/60 bg-slate-900/60 p-3 text-sm text-slate-300">
+                  <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <span className="text-xs uppercase tracking-wide text-cyan-200/80">실행된 추론 단계</span>
+                      <span className="ml-2 text-[11px] text-slate-400">{_reasoningSteps.length} steps</span>
+                    </div>
+                    {!isThinking && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-8 rounded-full border border-slate-700/60 bg-slate-900/30 px-3 text-[11px] font-semibold text-slate-200"
+                        onClick={() => setReasoningOpen((prev) => !prev)}
+                      >
+                        {reasoningOpen ? "추론 축소" : "추론 펼치기"}
+                        <ChevronDown
+                          className={cn(
+                            "ml-2 h-3 w-3 transition-transform",
+                            reasoningOpen ? "rotate-180" : "rotate-0",
+                          )}
+                        />
+                      </Button>
+                    )}
+                  </div>
+                  {reasoningOpen || isThinking ? (
+                    <ul className="space-y-2">
+                      {_reasoningSteps.map((step) => (
+                        <li
+                          key={step.id}
+                          className={cn(
+                            "rounded-md px-3 py-2 text-sm",
+                            step.isStageSummary
+                              ? "border border-cyan-500/40 bg-slate-900/70"
+                              : "bg-slate-900/40"
+                          )}
+                        >
+                          <div className="flex flex-wrap items-center gap-2 text-xs uppercase text-cyan-200/80">
+                            <span>{step.stage}</span>
+                            {step.iteration != null && (
+                              <span className="text-[10px] text-slate-400">#{step.iteration}</span>
+                            )}
+                          </div>
+                          <div className="mt-1 text-sm text-slate-200/90 whitespace-pre-wrap">{step.message}</div>
+                          {step.toolLogs && step.toolLogs.length > 0 && (
+                            <p className="mt-3 text-[11px] font-medium text-cyan-100/80">
+                              MCP 도구 {step.toolLogs.length}건 실행됨 — 우측 패널의 "사용한 도구 출력" 섹션에서 상세 로그를 확인하세요.
+                            </p>
+                          )}
+                          {step.toolLog && !step.toolLogs && (
+                            <p className="mt-2 text-[11px] text-cyan-100/80">
+                              "{step.toolLog.name}" 도구 실행됨 — 세부 정보는 우측 패널에서 확인하세요.
+                            </p>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="text-xs text-slate-400">
+                      총 {_reasoningSteps.length}개의 추론 단계를 축약했습니다. "추론 펼치기"를 눌러 전체 흐름을 확인하세요.
+                    </p>
+                  )}
+                </div>
+              )}
+
               <div className="prose prose-invert max-w-none text-sm leading-relaxed">
                 <MarkdownRenderer content={message} />
               </div>

@@ -1,0 +1,78 @@
+version: "3.9"
+
+x-node-service: &node-service
+  image: node:20
+  working_dir: /app
+  restart: unless-stopped
+  environment:
+    NODE_ENV: production
+    NPM_CONFIG_PRODUCTION: "false"
+  command: >-
+    sh -c "npm install && npm run build && npm run start"
+
+services:
+  mcp-alphafold:
+    <<: *node-service
+    container_name: mcp-alphafold
+    volumes:
+      - ./app/mcp/AlphaFold-MCP-Server:/app
+      - mcp_alphafold_node_modules:/app/node_modules
+  mcp-chembl:
+    <<: *node-service
+    container_name: mcp-chembl
+    volumes:
+      - ./app/mcp/ChEMBL-MCP-Server:/app
+      - mcp_chembl_node_modules:/app/node_modules
+  mcp-clinicaltrials:
+    <<: *node-service
+    container_name: mcp-clinicaltrials
+    volumes:
+      - ./app/mcp/ClinicalTrials-MCP-Server:/app
+      - mcp_clinicaltrials_node_modules:/app/node_modules
+  mcp-geneontology:
+    <<: *node-service
+    container_name: mcp-geneontology
+    volumes:
+      - ./app/mcp/GeneOntology-MCP-Server:/app
+      - mcp_geneontology_node_modules:/app/node_modules
+  mcp-kegg:
+    <<: *node-service
+    container_name: mcp-kegg
+    volumes:
+      - ./app/mcp/KEGG-MCP-Server:/app
+      - mcp_kegg_node_modules:/app/node_modules
+  mcp-openfda:
+    <<: *node-service
+    container_name: mcp-openfda
+    volumes:
+      - ./app/mcp/OpenFDA-MCP-Server:/app
+      - mcp_openfda_node_modules:/app/node_modules
+  mcp-opentargets:
+    <<: *node-service
+    container_name: mcp-opentargets
+    volumes:
+      - ./app/mcp/OpenTargets-MCP-Server:/app
+      - mcp_opentargets_node_modules:/app/node_modules
+  mcp-pdb:
+    <<: *node-service
+    container_name: mcp-pdb
+    volumes:
+      - ./app/mcp/PDB-MCP-Server:/app
+      - mcp_pdb_node_modules:/app/node_modules
+  mcp-reactome:
+    <<: *node-service
+    container_name: mcp-reactome
+    volumes:
+      - ./app/mcp/Reactome-MCP-Server:/app
+      - mcp_reactome_node_modules:/app/node_modules
+
+volumes:
+  mcp_alphafold_node_modules:
+  mcp_chembl_node_modules:
+  mcp_clinicaltrials_node_modules:
+  mcp_geneontology_node_modules:
+  mcp_kegg_node_modules:
+  mcp_openfda_node_modules:
+  mcp_opentargets_node_modules:
+  mcp_pdb_node_modules:
+  mcp_reactome_node_modules:

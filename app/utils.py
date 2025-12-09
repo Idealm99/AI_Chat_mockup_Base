@@ -5,6 +5,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 from openai import AsyncOpenAI
 import aiohttp
+import requests
 
 from app.logger import get_logger
 
@@ -61,12 +62,16 @@ async def _get_genos_token_async() -> str:
             return data["data"]["access_token"]
 
 
+def _get_openrouter_base_url() -> str:
+    return os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
+
+
 def _get_openai_client() -> AsyncOpenAI:
     """OpenAI 클라이언트 반환 (GenOS 미사용 시)"""
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY 환경 변수가 설정되지 않았습니다.")
-    return AsyncOpenAI(api_key=api_key)
+        raise RuntimeError("OPENROUTER_API_KEY 환경 변수가 설정되지 않았습니다.")
+    return AsyncOpenAI(api_key=api_key, base_url=_get_openrouter_base_url())
 
 
 def _get_default_model() -> str:
@@ -131,9 +136,14 @@ async def call_llm_stream(
     # GenOS LLM 서빙 사용 여부 확인
     if _use_genos_llm():
         log.info("GenOS를 통해 LLM 호출 시작")
-        async for item in _call_genos_llm_stream(messages, model, tools, temperature, **kwargs):
-            yield item
-        return
+        try:
+            async for item in _call_genos_llm_stream(messages, model, tools, temperature, **kwargs):
+                yield item
+            return
+        except Exception as e:
+            # GenOS 호출 중 오류가 발생하면 경고를 남기고 OpenAI로 폴백합니다.
+            log.warning("GenOS LLM 호출 중 오류 발생, OpenAI로 폴백합니다: %s", e)
+            # continue해서 아래 OpenAI 호출 블록으로 이어지게 함
     
     # 기존 OpenAI 직접 호출
     log.info("OpenAI API 직접 호출 (GenOS 미사용)")
@@ -276,7 +286,7 @@ async def _call_genos_llm_stream(
     GenOS Gateway를 통해 OpenRouter 모델에 접근합니다.
     """
     serving_id = _get_genos_llm_serving_id()
-    genos_url = os.getenv("GENOS_URL", "https://genos.mnc.ai:3443").rstrip("/")
+    genos_url = os.getenv("GENOS_URL", "https://genos.genon.ai:3443").rstrip("/")
     
     if serving_id == 0:
         raise RuntimeError("GENOS_LLM_SERVING_ID가 설정되지 않았거나 유효하지 않습니다.")

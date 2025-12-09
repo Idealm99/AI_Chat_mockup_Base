@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from "react";
+import { useState, useRef, useEffect, useMemo, useCallback } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import ChatContainer from "@/components/ChatContainer";
 import ChatInput from "@/components/ChatInput";
@@ -6,11 +6,51 @@ import { AppSidebar, Conversation } from "@/components/AppSidebar";
 import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { useToast } from "@/hooks/use-toast";
 import { streamLangGraphChat, getChatHistory, deleteChatHistory } from "@/lib/api";
-import { DocumentReference, Message, ReasoningStep } from "@/types/chat";
+import {
+  DocumentReference,
+  Message,
+  ReasoningStep,
+  UiPayload,
+  KnowledgeGraphData,
+  StructurePanelData,
+  ToolLog,
+} from "@/types/chat";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import KnowledgeGraphPanel from "@/components/KnowledgeGraphPanel";
 import ProteinStructurePanel from "@/components/ProteinStructurePanel";
+import ToolUsagePanel from "@/components/ToolUsagePanel";
+
+const TEMPLATE_PROMPTS = [
+  "위암(고형암)에 대한 신약 후보를 찾아줘",
+  "췌장암 치료 타겟으로 적합한 유전자 리스트를 뽑아줘.",
+  "TP53 유전자가 망가졌을 때 생물학적으로 어떤 일이 발생해?",
+  "알츠하이머 조기 진단을 위한 혈액 내 바이오마커 후보는?",
+  "BRCA1 변이 단백질 구조에 딱 맞는 리간드를 설계해줘.",
+];
+
+const STAGE_FLOW = [
+  { stageKey: "target_agent", code: "TV", title: "TargetAgent" },
+  { stageKey: "chem_agent", code: "CD", title: "ChemAgent" },
+  { stageKey: "structure_agent", code: "SA", title: "StructureAgent" },
+  { stageKey: "pathway_agent", code: "PI", title: "PathwayAgent" },
+  { stageKey: "clinical_agent", code: "CL", title: "ClinicalAgent" },
+] as const;
+
+type StagePriorityMeta = { stageKey: string; code: string; title: string; order: number };
+
+const STAGE_PRIORITY_MAP: Map<string, StagePriorityMeta> = new Map(
+  STAGE_FLOW.map((meta, index) => [meta.stageKey, { ...meta, order: index }]),
+);
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null;
+
+const toStringOrDefault = (value: unknown, fallback = "") =>
+  typeof value === "string" ? value : fallback;
+
+const toNullablePrimitive = (value: unknown): string | number | null =>
+  typeof value === "string" || typeof value === "number" ? value : null;
 
 const Index = () => {
   const [searchParams] = useSearchParams();
@@ -21,6 +61,7 @@ const Index = () => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [uiPayload, setUiPayload] = useState<UiPayload | null>(null);
   const { toast } = useToast();
   const navigate = useNavigate();
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -29,6 +70,7 @@ const Index = () => {
   );
   const lastPrefillKeyRef = useRef<string | null>(null);
   const skipNextHistoryLoadRef = useRef(false);
+  const stageToolLogsRef = useRef<Record<string, ToolLog[]>>({});
 
   const decodeParam = (value: string) => {
     try {
@@ -53,27 +95,18 @@ const Index = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
-    if (currentConversationId) {
-      if (skipNextHistoryLoadRef.current) {
-        skipNextHistoryLoadRef.current = false;
-        return;
-      }
-      loadChatHistory(currentConversationId);
-    }
-  }, [currentConversationId]);
-
-  const loadChatHistory = async (chatId: string) => {
+  const loadChatHistory = useCallback(async (chatId: string) => {
     try {
       setIsLoadingHistory(true);
+      setUiPayload(null);
       const response = await getChatHistory(chatId);
       
       if (response.messages && Array.isArray(response.messages)) {
         // 백엔드 메시지 형식을 프론트엔드 형식으로 변환
-        const loadedMessages: Message[] = response.messages.map((msg: any, idx: number) => ({
+        const loadedMessages: Message[] = response.messages.map((msg, idx) => ({
           id: `${chatId}-${idx}`,
-          text: msg.content || "",
-          isUser: msg.role === "user",
+          text: msg?.content ?? "",
+          isUser: msg?.role === "user",
           timestamp: new Date(),
           reasoningSteps: [],
           isThinking: false,
@@ -94,7 +127,17 @@ const Index = () => {
     } finally {
       setIsLoadingHistory(false);
     }
-  };
+  }, [toast]);
+
+  useEffect(() => {
+    if (currentConversationId) {
+      if (skipNextHistoryLoadRef.current) {
+        skipNextHistoryLoadRef.current = false;
+        return;
+      }
+      void loadChatHistory(currentConversationId);
+    }
+  }, [currentConversationId, loadChatHistory]);
 
   const handleNewConversation = () => {
     cancelOngoingStream();
@@ -107,11 +150,13 @@ const Index = () => {
     skipNextHistoryLoadRef.current = true;
     setCurrentConversationId(newConversation.id);
     setMessages([]);
+    setUiPayload(null);
   };
 
   const handleSelectConversation = (id: string) => {
     cancelOngoingStream();
     setCurrentConversationId(id);
+    setUiPayload(null);
     // 히스토리는 useEffect에서 자동으로 로드됨
   };
 
@@ -123,6 +168,7 @@ const Index = () => {
       if (currentConversationId === id) {
         setCurrentConversationId(undefined);
         setMessages([]);
+        setUiPayload(null);
       }
       toast({
         title: "대화 삭제됨",
@@ -189,6 +235,7 @@ const Index = () => {
       isThinking: true,
       references: [],
     };
+    stageToolLogsRef.current = {};
     setMessages((prev) => [...prev, aiMessage]);
 
     try {
@@ -220,24 +267,32 @@ const Index = () => {
             );
           }
         } else if (event.event === "reasoning") {
-          const payload = event.data ?? {};
-          const stage = typeof payload?.stage === "string" ? payload.stage : "info";
+          const payload = event.data;
+          const payloadRecord = isRecord(payload) ? payload : undefined;
+          const stage = payloadRecord && typeof payloadRecord.stage === "string" ? payloadRecord.stage : "info";
           const message =
             typeof payload === "string"
               ? payload
-              : typeof payload?.message === "string"
-              ? payload.message
-              : JSON.stringify(payload);
-          const iteration =
-            typeof payload === "object" && payload !== null && typeof payload.iteration === "number"
-              ? payload.iteration
-              : undefined;
+              : payloadRecord && typeof payloadRecord.message === "string"
+              ? payloadRecord.message
+              : JSON.stringify(payload ?? {});
+          const iteration = payloadRecord && typeof payloadRecord.iteration === "number"
+            ? payloadRecord.iteration
+            : undefined;
+          const stageKey = payloadRecord && typeof payloadRecord.stage === "string" ? payloadRecord.stage : undefined;
+          const isStageSummary = Boolean(stageKey && Array.isArray((payloadRecord as { results?: unknown }).results));
+          const attachedToolLogs = stageKey && isStageSummary
+            ? (stageToolLogsRef.current[stageKey] ?? [])
+            : undefined;
           const step: ReasoningStep = {
             id: `${aiMessageId}-reason-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
             stage,
             message,
             iteration,
             timestamp: new Date(),
+            stageKey,
+            isStageSummary,
+            toolLogs: attachedToolLogs && attachedToolLogs.length > 0 ? [...attachedToolLogs] : undefined,
           };
           setMessages((prev) =>
             prev.map((msg) =>
@@ -249,16 +304,96 @@ const Index = () => {
                 : msg
             )
           );
+        } else if (event.event === "tool_use") {
+          const payload = isRecord(event.data) ? (event.data as Record<string, unknown>) : {};
+          const baseToolName = toStringOrDefault(
+            (payload.tool_label as string) ?? (payload.tool_name as string) ?? (payload.toolName as string),
+            "알 수 없는 도구"
+          );
+          const description = toStringOrDefault((payload.description as string) ?? "");
+          const timestampValue = payload.timestamp as string | undefined;
+          const toolTimestamp = timestampValue ? new Date(timestampValue) : new Date();
+          const inputArgs =
+            payload.input_args ?? payload.inputArgs ?? payload.arguments ?? payload.tool_args ?? null;
+          const outputResult =
+            payload.output_result ?? payload.outputResult ?? payload.result ?? payload.tool_result ?? null;
+          const outputPreview = toStringOrDefault((payload.output_preview as string) ?? "");
+          const stageKeyRaw = toStringOrDefault((payload.stage as string) ?? (payload.stage_key as string) ?? "");
+          const stageTitle = toStringOrDefault(payload.stage_title as string);
+          const serverName = toStringOrDefault(payload.server_name as string);
+
+          const log: ToolLog = {
+            id: `${aiMessageId}-tool-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            name: baseToolName,
+            rawToolName: toStringOrDefault(payload.tool_name as string),
+            description,
+            inputArgs,
+            outputResult,
+            outputPreview,
+            timestamp: toolTimestamp,
+            stageKey: stageKeyRaw || undefined,
+            stageTitle: stageTitle || undefined,
+            serverName: serverName || undefined,
+          };
+
+          if (log.stageKey) {
+            stageToolLogsRef.current[log.stageKey] = [
+              ...(stageToolLogsRef.current[log.stageKey] ?? []),
+              log,
+            ];
+          }
+
+          setMessages((prev) =>
+            prev.map((msg) => {
+              if (msg.id !== aiMessageId) {
+                return msg;
+              }
+              const updatedSteps = (msg.reasoningSteps ?? []).map((step) => {
+                if (!log.stageKey || step.stageKey !== log.stageKey) {
+                  return step;
+                }
+                const existing = step.toolLogs ?? [];
+                if (existing.some((item) => item.id === log.id)) {
+                  return step;
+                }
+                return {
+                  ...step,
+                  toolLogs: [...existing, log],
+                };
+              });
+              return {
+                ...msg,
+                reasoningSteps: updatedSteps,
+              };
+            })
+          );
         } else if (event.event === "metadata") {
           console.debug("LangGraph metadata", event.data);
         } else if (event.event === "document_references") {
-          const docs = Array.isArray(event.data?.documents) ? event.data.documents : [];
-          const normalized: DocumentReference[] = docs.map((doc: any, idx: number) => ({
-            fileName: doc.file_name ?? doc.fileName ?? `문서 ${idx + 1}`,
-            page: doc.page ?? doc.page_number ?? null,
-            position: doc.position ?? null,
-            contentSnippet: doc.content_snippet ?? doc.contentSnippet ?? "",
-          }));
+          const payload = isRecord(event.data) ? event.data : {};
+          const docs = Array.isArray((payload as { documents?: unknown }).documents)
+            ? (payload as { documents: unknown[] }).documents
+            : [];
+          const normalized: DocumentReference[] = docs.map((doc, idx) => {
+            if (!isRecord(doc)) {
+              return {
+                fileName: `문서 ${idx + 1}`,
+                page: null,
+                position: null,
+                contentSnippet: "",
+              };
+            }
+            return {
+              fileName:
+                toStringOrDefault(doc.file_name) ||
+                toStringOrDefault(doc.fileName) ||
+                `문서 ${idx + 1}`,
+              page: toNullablePrimitive(doc.page ?? doc.page_number),
+              position: toNullablePrimitive(doc.position),
+              contentSnippet:
+                toStringOrDefault(doc.content_snippet) || toStringOrDefault(doc.contentSnippet),
+            };
+          });
           setMessages((prev) =>
             prev.map((msg) =>
               msg.id === aiMessageId
@@ -269,9 +404,12 @@ const Index = () => {
                 : msg
             )
           );
+        } else if (event.event === "ui_payload") {
+          const payload: UiPayload | null = isRecord(event.data) ? (event.data as UiPayload) : null;
+          setUiPayload(payload);
         } else if (event.event === "error") {
           // 에러 처리
-          const errorText = event.data || "알 수 없는 오류가 발생했습니다.";
+          const errorText = toStringOrDefault(event.data, "알 수 없는 오류가 발생했습니다.");
           setMessages((prev) =>
             prev.map((msg) =>
               msg.id === aiMessageId
@@ -393,6 +531,10 @@ const Index = () => {
     navigate("/");
   };
 
+  const handleTemplateSelect = (prompt: string) => {
+    void handleSendMessage(prompt);
+  };
+
   const activeConversation = useMemo(
     () => conversations.find((conversation) => conversation.id === currentConversationId),
     [conversations, currentConversationId],
@@ -408,13 +550,105 @@ const Index = () => {
     [messages],
   );
 
-  const latestReasoning = latestAssistantMessage?.reasoningSteps ?? [];
+  const latestReasoning = useMemo(
+    () => latestAssistantMessage?.reasoningSteps ?? [],
+    [latestAssistantMessage],
+  );
   const latestReferences = latestAssistantMessage?.references ?? [];
+  const knowledgeGraphData = useMemo<KnowledgeGraphData | null>(
+    () => uiPayload?.knowledge_graph ?? uiPayload?.knowledgeGraph ?? null,
+    [uiPayload],
+  );
+  const structurePanelData = useMemo<StructurePanelData | null>(
+    () => uiPayload?.structure_panel ?? uiPayload?.structurePanel ?? null,
+    [uiPayload],
+  );
+  const toolUsageGroups = useMemo(() => {
+    type LogWithPosition = ToolLog & { __position: number };
+    const rawLogs = latestReasoning
+      .flatMap((step) => step.toolLogs ?? [])
+      .filter((log): log is ToolLog => Boolean(log));
+    if (rawLogs.length === 0) {
+      return [];
+    }
+    const dedupedLogs: LogWithPosition[] = [];
+    const seenKeys = new Set<string>();
+    rawLogs.forEach((log, index) => {
+      const dedupeKey =
+        log.id || `${log.stageKey ?? "_"}-${log.name ?? log.rawToolName ?? "tool"}-${log.timestamp?.toISOString() ?? index}`;
+      if (seenKeys.has(dedupeKey)) {
+        return;
+      }
+      seenKeys.add(dedupeKey);
+      dedupedLogs.push({ ...log, __position: index });
+    });
+    if (dedupedLogs.length === 0) {
+      return [];
+    }
+    let fallbackOrder = STAGE_FLOW.length;
+    const grouped = new Map<
+      string,
+      {
+        meta: { stageKey: string; code: string; title: string; order: number };
+        logs: LogWithPosition[];
+      }
+    >();
+
+    dedupedLogs.forEach((log) => {
+      const stageKey = log.stageKey || "__unknown_stage__";
+      const knownMeta = STAGE_PRIORITY_MAP.get(stageKey);
+      const fallbackTitle = log.stageTitle || log.serverName || "기타 단계";
+      const fallbackCode = (log.stageTitle || stageKey || "STEP").slice(0, 2).toUpperCase();
+      const meta = knownMeta ?? {
+        stageKey,
+        code: fallbackCode,
+        title: fallbackTitle,
+        order: fallbackOrder++,
+      };
+      const existing = grouped.get(stageKey) ?? { meta, logs: [] };
+      existing.logs.push(log);
+      grouped.set(stageKey, existing);
+    });
+
+    return Array.from(grouped.values())
+      .map((entry) => {
+        const sortedLogs = [...entry.logs]
+          .sort((a, b) => {
+            const timeA = a.timestamp?.getTime() ?? Number.MAX_SAFE_INTEGER;
+            const timeB = b.timestamp?.getTime() ?? Number.MAX_SAFE_INTEGER;
+            if (timeA !== timeB) {
+              return timeA - timeB;
+            }
+            return a.__position - b.__position;
+          })
+          .map(({ __position, ...rest }) => rest);
+        const firstTimestamp = sortedLogs[0]?.timestamp?.getTime() ?? Number.MAX_SAFE_INTEGER;
+        return {
+          stageKey: entry.meta.stageKey,
+          code: entry.meta.code,
+          title: entry.meta.title,
+          logs: sortedLogs,
+          order: entry.meta.order,
+          firstTimestamp,
+        };
+      })
+      .sort((a, b) => {
+        if (a.firstTimestamp !== b.firstTimestamp) {
+          return a.firstTimestamp - b.firstTimestamp;
+        }
+        if (a.order !== b.order) {
+          return a.order - b.order;
+        }
+        return a.stageKey.localeCompare(b.stageKey);
+      })
+      .map(({ order, firstTimestamp, ...rest }) => rest);
+  }, [latestReasoning]);
   const streamingStatusLabel = isLoading
     ? "Streaming"
     : isLoadingHistory
     ? "Loading history"
     : "Idle";
+  const showHeroLanding = messages.length === 0 && !isLoadingHistory;
 
   return (
   <SidebarProvider className="command-center-theme bg-slate-950 text-slate-100">
@@ -458,7 +692,32 @@ const Index = () => {
 
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
               <div className="flex-1 overflow-hidden px-2 py-4 sm:px-6 lg:px-10">
-                <ChatContainer messages={messages} isLoading={isLoadingHistory} />
+                {showHeroLanding ? (
+                  <div className="flex h-full items-center justify-center">
+                    <div className="w-full max-w-3xl rounded-3xl border border-slate-800/70 bg-gradient-to-b from-slate-900/60 to-slate-950/80 p-8 text-center shadow-[0_25px_120px_-60px_rgba(14,165,233,0.8)]">
+                      <p className="text-xs uppercase tracking-[0.4em] text-cyan-300/80">JW Research AI Ready</p>
+                      <h2 className="mt-4 text-3xl font-semibold text-slate-50">
+                        왼쪽 패널에서 새 대화를 시작하거나 아래 템플릿으로 연구 여정을 빠르게 열어보세요.
+                      </h2>
+                      <p className="mt-4 text-base text-slate-300/90">
+                        실제 MCP 워크플로우와 연결된 대표 질문들입니다. 클릭하면 바로 분석이 시작됩니다.
+                      </p>
+                      <div className="mt-8 grid gap-3 md:grid-cols-2">
+                        {TEMPLATE_PROMPTS.map((prompt) => (
+                          <button
+                            key={prompt}
+                            onClick={() => handleTemplateSelect(prompt)}
+                            className="rounded-2xl border border-slate-800/70 bg-slate-900/70 px-5 py-4 text-left text-sm text-slate-100 transition hover:-translate-y-0.5 hover:border-cyan-400/60 hover:bg-slate-900/90"
+                          >
+                            {prompt}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <ChatContainer messages={messages} isLoading={isLoadingHistory} />
+                )}
               </div>
               <div className="bg-slate-900/50 px-3 pb-8 pt-4 sm:px-6 lg:px-10">
                 <ChatInput onSendMessage={handleSendMessage} disabled={isLoading || isLoadingHistory} />
@@ -467,42 +726,6 @@ const Index = () => {
           </div>
 
           <aside className="hidden w-full max-w-sm flex-col gap-5 border-l border-slate-800/70 bg-slate-950/60 p-6 backdrop-blur-xl xl:flex">
-            <section className="rounded-2xl border border-slate-800/60 bg-slate-900/60 p-5">
-              <div className="flex items-center justify-between">
-                <div>
-                  <span className="text-[11px] uppercase tracking-[0.28em] text-cyan-300/80">Reasoning Process</span>
-                  <h3 className="mt-1 text-sm font-semibold text-slate-100">
-                    {activeConversation?.title ?? "현재 대화"}
-                  </h3>
-                </div>
-                <span className="text-xs text-slate-400">{latestReasoning.length} steps</span>
-              </div>
-              <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-800/80">
-                <div
-                  className={cn(
-                    "h-full rounded-full transition-all duration-700",
-                    isLoading ? "w-3/5 animate-pulse bg-cyan-400/80" : "w-full bg-emerald-400/80",
-                  )}
-                />
-              </div>
-              <ul className="mt-4 space-y-3 text-sm text-slate-300/80 overflow-y-auto rounded-xl border border-slate-800/60 bg-slate-900/40 p-2 transition-all duration-200 dark:bg-slate-900/50 max-h-[26rem]">
-                {latestReasoning.length === 0 ? (
-                  <li className="rounded-xl border border-dashed border-slate-800/70 bg-slate-900/50 px-3 py-4 text-center text-xs text-slate-500">
-                    아직 추론 정보가 수집되지 않았습니다.
-                  </li>
-                ) : (
-                  latestReasoning.map((step) => (
-                    <li key={step.id} className="rounded-xl border border-slate-800/80 bg-slate-900/70 px-3 py-2">
-                      <p className="text-xs uppercase tracking-wide text-cyan-200/80">
-                        {step.stage}
-                      </p>
-                      <p className="mt-1 text-sm text-slate-200/90">{step.message}</p>
-                    </li>
-                  ))
-                )}
-              </ul>
-            </section>
-
             <section className="rounded-2xl border border-slate-800/60 bg-slate-900/60 p-5">
               <div className="flex items-center justify-between">
                 <span className="text-[11px] uppercase tracking-[0.28em] text-slate-500">References</span>
@@ -526,9 +749,14 @@ const Index = () => {
               </ul>
             </section>
 
-            <KnowledgeGraphPanel isActive={hasCompletedAssistantResponse} />
+            <ToolUsagePanel groups={toolUsageGroups} isActive={hasCompletedAssistantResponse} />
 
-            <ProteinStructurePanel isActive={hasCompletedAssistantResponse} />
+            <KnowledgeGraphPanel isActive={hasCompletedAssistantResponse} data={knowledgeGraphData ?? undefined} />
+
+            <ProteinStructurePanel
+              isActive={hasCompletedAssistantResponse}
+              data={structurePanelData ?? undefined}
+            />
           </aside>
         </div>
       </div>

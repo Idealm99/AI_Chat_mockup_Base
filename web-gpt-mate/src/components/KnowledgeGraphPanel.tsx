@@ -1,21 +1,22 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import ForceGraph2D, { ForceGraphMethods } from "react-force-graph-2d";
 import type { LinkObject, NodeObject } from "react-force-graph-2d";
+import type { KnowledgeGraphData } from "@/types/chat";
 
 interface KnowledgeGraphNode extends NodeObject {
   id: string;
   label: string;
-  group: "target" | "pathway" | "compound";
+  group: "target" | "pathway" | "compound" | string;
   level: number;
 }
 
 interface KnowledgeGraphLink extends LinkObject {
   source: string;
   target: string;
-  strength: number;
+  strength?: number;
 }
 
-const KNOWLEDGE_GRAPH_DATA = {
+const KNOWLEDGE_GRAPH_DATA: KnowledgeGraphData = {
   nodes: [
     { id: "KRAS", label: "KRAS", group: "target", level: 0 },
     { id: "PI3K", label: "PI3K", group: "pathway", level: 1 },
@@ -52,9 +53,10 @@ const groupColor = {
 
 interface KnowledgeGraphPanelProps {
   isActive?: boolean;
+  data?: KnowledgeGraphData;
 }
 
-const KnowledgeGraphPanel = ({ isActive = true }: KnowledgeGraphPanelProps) => {
+const KnowledgeGraphPanel = ({ isActive = true, data }: KnowledgeGraphPanelProps) => {
   const graphRef = useRef<ForceGraphMethods>();
   const canvasContainerRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
@@ -75,7 +77,7 @@ const KnowledgeGraphPanel = ({ isActive = true }: KnowledgeGraphPanelProps) => {
     return () => observer.disconnect();
   }, []);
 
-  const graphData = useMemo(() => KNOWLEDGE_GRAPH_DATA, []);
+  const graphData = useMemo<KnowledgeGraphData>(() => data ?? KNOWLEDGE_GRAPH_DATA, [data]);
 
   useEffect(() => {
     if (!isActive) {
@@ -118,7 +120,13 @@ const KnowledgeGraphPanel = ({ isActive = true }: KnowledgeGraphPanelProps) => {
               linkColor={() => "rgba(34,211,238,0.35)"}
               linkDirectionalParticles={2}
               linkDirectionalParticleSpeed={() => 0.0025}
-              linkWidth={(link) => (typeof link === "object" && "strength" in link ? (link as KnowledgeGraphLink).strength * 1.2 : 1)}
+              linkWidth={(link) => {
+                if (typeof link === "object" && link !== null && "strength" in link) {
+                  const weight = (link as KnowledgeGraphLink).strength ?? 1;
+                  return Math.max(weight * 1.2, 0.5);
+                }
+                return 1;
+              }}
               nodeRelSize={6}
               cooldownTicks={120}
               onEngineStop={() => {
@@ -130,6 +138,7 @@ const KnowledgeGraphPanel = ({ isActive = true }: KnowledgeGraphPanelProps) => {
               nodeCanvasObject={(node, ctx, globalScale) => {
                 const n = node as KnowledgeGraphNode;
                 const label = n.label;
+                const color = groupColor[n.group as keyof typeof groupColor] ?? "#38bdf8";
                 const fontSize = 12 / globalScale;
                 const paddingX = 10;
                 const paddingY = 6;
@@ -141,8 +150,8 @@ const KnowledgeGraphPanel = ({ isActive = true }: KnowledgeGraphPanelProps) => {
                 const radius = 18 / globalScale;
 
                 ctx.beginPath();
-                ctx.fillStyle = `${groupColor[n.group]}33`;
-                ctx.strokeStyle = `${groupColor[n.group]}66`;
+                ctx.fillStyle = `${color}33`;
+                ctx.strokeStyle = `${color}66`;
                 ctx.lineWidth = 1.5 / globalScale;
                 const r = Math.min(radius, height / 2);
                 ctx.moveTo(x + r, y);

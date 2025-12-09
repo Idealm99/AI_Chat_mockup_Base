@@ -8,12 +8,43 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import type { StructurePanelData } from "@/types/chat";
 
-const viewerConfig = {
+interface ViewerConfig {
+  backgroundColor: string;
+  antialias: boolean;
+  cartoonQuality: number;
+}
+
+const viewerConfig: ViewerConfig = {
   backgroundColor: "#030712",
   antialias: true,
   cartoonQuality: 20,
 };
+
+type GLViewer = {
+  addModel: (data: string, format: string) => void;
+  setStyle: (selection: Record<string, unknown>, style: Record<string, unknown>) => void;
+  addSurface: (surfaceType: unknown, options: Record<string, unknown>) => void;
+  center: () => void;
+  zoomTo: (selection?: Record<string, unknown>, animationTime?: number, scale?: number) => void;
+  render: () => void;
+  resize?: () => void;
+  removeAllModels?: () => void;
+  clear?: () => void;
+  translate?: (x: number, y: number, z: number) => void;
+  rotate?: (angle: number, axis: unknown) => void;
+};
+
+type Vector3Factory = new (...args: number[]) => unknown;
+
+type ThreeDMol = {
+  GLViewer: new (element: Element, config: ViewerConfig) => GLViewer;
+  SurfaceType: Record<string, unknown>;
+  Vector3: Vector3Factory;
+};
+
+const Mol3D = $3Dmol as unknown as ThreeDMol;
 
 const syncCanvasToContainer = (element: HTMLDivElement | null) => {
   if (!element) return;
@@ -32,13 +63,20 @@ const syncCanvasToContainer = (element: HTMLDivElement | null) => {
 
 interface ProteinStructurePanelProps {
   isActive?: boolean;
+  data?: StructurePanelData;
 }
 
-const ProteinStructurePanel = ({ isActive = true }: ProteinStructurePanelProps) => {
+const FALLBACK_PDB_SOURCES = [
+  "https://alphafoldserver.com/example/examplefold_pdb_8aw3.pdb",
+  "https://alphafoldserver.com/example/examplefold_pdb_8aw3",
+  "https://files.rcsb.org/download/8AW3.pdb",
+];
+
+const ProteinStructurePanel = ({ isActive = true, data }: ProteinStructurePanelProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
-  const viewerRef = useRef<any>(null);
+  const viewerRef = useRef<GLViewer | null>(null);
   const modalContainerRef = useRef<HTMLDivElement>(null);
-  const modalViewerRef = useRef<any>(null);
+  const modalViewerRef = useRef<GLViewer | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [pdbData, setPdbData] = useState<string | null>(null);
@@ -60,16 +98,11 @@ const ProteinStructurePanel = ({ isActive = true }: ProteinStructurePanelProps) 
       element.innerHTML = "";
 
       try {
-        const viewer = new ($3Dmol as any).GLViewer(element, viewerConfig);
+  const viewer = new Mol3D.GLViewer(element, viewerConfig);
         viewerRef.current = viewer;
 
-        const pdbSources = [
-          "https://alphafoldserver.com/example/examplefold_pdb_8aw3.pdb",
-          "https://alphafoldserver.com/example/examplefold_pdb_8aw3",
-          "https://files.rcsb.org/download/8AW3.pdb",
-        ];
-
         let pdbData: string | null = null;
+        const pdbSources = data?.pdbUrl ? [data.pdbUrl] : FALLBACK_PDB_SOURCES;
         for (const source of pdbSources) {
           try {
             const response = await fetch(source, { mode: "cors" });
@@ -91,13 +124,13 @@ const ProteinStructurePanel = ({ isActive = true }: ProteinStructurePanelProps) 
           throw new Error("PDB 데이터를 가져오지 못했습니다.");
         }
 
-        setPdbData(pdbData);
+    setPdbData(pdbData);
         viewer.addModel(pdbData, "pdb");
         if (isCancelled) {
           return;
         }
         viewer.setStyle({}, { cartoon: { color: "spectrum" } });
-        viewer.addSurface(($3Dmol as any).SurfaceType.VDW, {
+        viewer.addSurface(Mol3D.SurfaceType.VDW, {
           opacity: 0.15,
           color: "#0ea5e9",
         });
@@ -129,7 +162,7 @@ const ProteinStructurePanel = ({ isActive = true }: ProteinStructurePanelProps) 
       }
       viewerRef.current = null;
     };
-  }, [isActive]);
+  }, [isActive, data?.pdbUrl]);
 
   useEffect(() => {
     if (!viewerRef.current || !containerRef.current) return;
@@ -160,14 +193,14 @@ const ProteinStructurePanel = ({ isActive = true }: ProteinStructurePanelProps) 
 
     const element = modalContainerRef.current;
     element.innerHTML = "";
-    const viewer = new ($3Dmol as any).GLViewer(element, {
+    const viewer = new Mol3D.GLViewer(element, {
       ...viewerConfig,
       backgroundColor: "#010712",
     });
     modalViewerRef.current = viewer;
     viewer.addModel(pdbData, "pdb");
     viewer.setStyle({}, { cartoon: { color: "spectrum" } });
-    viewer.addSurface(($3Dmol as any).SurfaceType.VDW, {
+    viewer.addSurface(Mol3D.SurfaceType.VDW, {
       opacity: 0.12,
       color: "#0ea5e9",
     });
@@ -216,20 +249,20 @@ const ProteinStructurePanel = ({ isActive = true }: ProteinStructurePanelProps) 
       }
 
       container.innerHTML = "";
-      const viewer = new ($3Dmol as any).GLViewer(container, {
+      const viewer = new Mol3D.GLViewer(container, {
         ...viewerConfig,
         backgroundColor: "#010712",
       });
       modalViewerRef.current = viewer;
       viewer.addModel(pdbData, "pdb");
       viewer.setStyle({}, { cartoon: { color: "spectrum" } });
-      viewer.addSurface(($3Dmol as any).SurfaceType.VDW, {
+      viewer.addSurface(Mol3D.SurfaceType.VDW, {
         opacity: 0.12,
         color: "#0ea5e9",
       });
       viewer.center();
-      viewer.rotate(0.04, new ($3Dmol as any).Vector3(0, 1, 0));
-      viewer.translate(0.52, -0.42, 0);
+      viewer.rotate?.(0.04, new Mol3D.Vector3(0, 1, 0));
+  viewer.translate?.(0.52, -0.42, 0);
       viewer.zoomTo({}, 0, 1.72);
       viewer.render();
       syncCanvasToContainer(container);
@@ -276,9 +309,29 @@ const ProteinStructurePanel = ({ isActive = true }: ProteinStructurePanelProps) 
           />
           <div className="mt-3 text-xs text-emerald-200/80">
             {!isActive && <span>AI 응답이 생성되면 AlphaFold 구조를 불러옵니다.</span>}
-            {isActive && status === "loading" && <span>AlphaFold 모델을 불러오는 중입니다...</span>}
+            {isActive && status === "loading" && <span>구조 데이터를 불러오는 중입니다...</span>}
             {isActive && status === "error" && (
               <span className="text-red-300">구조를 불러오지 못했습니다: {errorMessage}</span>
+            )}
+            {isActive && status === "ready" && (
+              <div className="space-y-1 text-emerald-100/80">
+                {data?.target && (
+                  <p>
+                    <span className="font-medium text-emerald-200">Target:</span> {data.target}
+                    {data?.pdbId && ` · PDB ${data.pdbId}`}
+                  </p>
+                )}
+                {data?.compound && (
+                  <p>
+                    <span className="font-medium text-emerald-200">Compound:</span> {data.compound}
+                  </p>
+                )}
+                {data?.bindingPocket && (
+                  <p>
+                    <span className="font-medium text-emerald-200">Pocket:</span> {data.bindingPocket}
+                  </p>
+                )}
+              </div>
             )}
           </div>
         </div>

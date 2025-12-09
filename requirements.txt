@@ -15,3 +15,6 @@ langchain-community>=0.2.0
 langgraph>=0.1.7
 httpx>=0.24.0
 weaviate-client==4.11.1
+langchain-mcp-adapters
+pytest>=7.4
+rapidfuzz
