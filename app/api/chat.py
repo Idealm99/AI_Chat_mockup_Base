@@ -7,6 +7,13 @@ from uuid import uuid4
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 
 from app.utils import (
     call_llm_stream, 
@@ -80,19 +87,31 @@ async def chat_stream(
             if states.user_id:
                 model_set_context_list = await store.get_messages(states.user_id)
                 if model_set_context_list:
-                    model_set_context = [{
-                            "role": "system",
-                            "content": "### User Memory\n" + "\n".join([f"{idx}. {msc}" for idx, msc in enumerate(model_set_context_list,   start=1)])
-                        }]
+                    model_set_context = [SystemMessage(
+                            content="### User Memory\n" + "\n".join([f"{idx}. {msc}" for idx, msc in enumerate(model_set_context_list,   start=1)])
+                        )]
             
-            persisted = (await store.get_messages(chat_id)) or []
+            persisted_dicts = (await store.get_messages(chat_id)) or []
+            persisted = []
+            for msg in persisted_dicts:
+                role = msg.get("role")
+                content = msg.get("content", "")
+                if role == "user":
+                    persisted.append(HumanMessage(content=content))
+                elif role == "assistant":
+                    persisted.append(AIMessage(content=content, tool_calls=msg.get("tool_calls")))
+                elif role == "system":
+                    persisted.append(SystemMessage(content=content))
+                elif role == "tool":
+                    persisted.append(ToolMessage(content=content, tool_call_id=msg.get("tool_call_id")))
+
             history = [
                 *persisted,
-                {"role": "user", "content": req.question}
+                HumanMessage(content=req.question)
             ]
             
             states.messages = [
-                {"role": "system", "content": system_prompt},
+                SystemMessage(content=system_prompt),
                 *model_set_context,
                 *history
             ]
@@ -126,11 +145,28 @@ async def chat_stream(
                     break
                 
                 # 최종 메시지를 states.messages에 추가
-                states.messages.append(final_message)
+                if isinstance(final_message, dict):
+                    role = final_message.get("role")
+                    content = final_message.get("content", "")
+                    tool_calls = final_message.get("tool_calls")
+                    if role == "assistant":
+                        msg_obj = AIMessage(content=content, tool_calls=tool_calls)
+                    elif role == "user":
+                        msg_obj = HumanMessage(content=content)
+                    elif role == "system":
+                        msg_obj = SystemMessage(content=content)
+                    elif role == "tool":
+                        msg_obj = ToolMessage(content=content, tool_call_id=final_message.get("tool_call_id"))
+                    else:
+                        msg_obj = BaseMessage(content=content, type=role)
+                else:
+                    msg_obj = final_message
+
+                states.messages.append(msg_obj)
                 
                 # tool_calls와 content 확인
-                tool_calls = final_message.get("tool_calls") or []
-                contents = final_message.get("content", "")
+                tool_calls = getattr(msg_obj, "tool_calls", []) if hasattr(msg_obj, "tool_calls") else []
+                contents = msg_obj.content
                 
                 # 툴 호출이 없고 콘텐츠가 있으면 종료
                 if not tool_calls and contents:
@@ -242,7 +278,7 @@ async def chat_stream(
                             tool_res = f"Error calling {tool_name}: {e}\n\nTry again with different arguments."
                         
                         tool_call_id = tool_call.get('id', '')
-                        states.messages.append({"role": "tool", "content": str(tool_res), "tool_call_id": tool_call_id})
+                        states.messages.append(ToolMessage(content=str(tool_res), tool_call_id=tool_call_id))
 
         except Exception as e:
             log.exception("chat stream failed")
@@ -252,18 +288,25 @@ async def chat_stream(
             # states와 history가 정의되어 있고 유효한 경우에만 메시지 저장
             try:
                 if states and hasattr(states, 'messages') and states.messages and chat_id:
-                    last_message = states.messages[-1]
+                    # BaseMessage 객체들을 dict로 변환하여 저장
+                    to_save = []
+                    for msg in states.messages:
+                        if isinstance(msg, SystemMessage):
+                            continue # 시스템 프롬프트는 저장하지 않음 (필요에 따라 조절)
+                        
+                        m_dict = {"role": msg.type, "content": msg.content}
+                        if isinstance(msg, AIMessage) and msg.tool_calls:
+                            m_dict["tool_calls"] = msg.tool_calls
+                        if isinstance(msg, ToolMessage):
+                            m_dict["tool_call_id"] = msg.tool_call_id
+                        
+                        # assistant 메시지 정규화
+                        if m_dict["role"] == "assistant" and isinstance(m_dict["content"], str):
+                            m_dict["content"] = re.sub(r"【[^】]*】", "", m_dict["content"]).strip()
+                        
+                        to_save.append(m_dict)
                     
-                    if isinstance(last_message, dict) and last_message.get("role") == "assistant":
-                        content = last_message.get("content", "")
-                        if isinstance(content, str):
-                            content = re.sub(r"【[^】]*】", "", content).strip()
-                            last_message = {**last_message, "content": content}
-                    
-                    # history에 마지막 메시지 추가하고 저장
-                    if history:
-                        history.append(last_message)
-                        await store.save_messages(chat_id, history)
+                    await store.save_messages(chat_id, to_save)
             except Exception as e:
                 log.exception("failed to save messages in finally block", extra={"chat_id": chat_id})
             
@@ -325,11 +368,7 @@ async def chat_langgraph(
         try:
             await emit("token", "")
 
-            history_records = await history_store.get_chat_history(chat_id, limit=10)
-            history_messages = [
-                {"role": msg.get("role", "assistant"), "content": msg.get("content", "")}
-                for msg in history_records
-            ]
+            history_messages = await history_store.get_chat_history_as_messages(chat_id, limit=10)
 
             await history_store.save_message(chat_id, "user", req.question)
 
@@ -407,122 +446,6 @@ async def chat_langgraph(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
-
-@router.post("/chat/multiturn")
-async def chat_multiturn(
-    req: GenerateRequest,
-    request: Request
-) -> StreamingResponse:
-    """
-    LangChain Agent를 이용한 멀티턴 대화
-    최대 10개 메시지 윈도우를 유지합니다.
-    """
-    queue: asyncio.Queue[str] = asyncio.Queue()
-    SENTINEL = "__STREAM_DONE__"
-    client_disconnected = asyncio.Event()
-
-    async def emit(event: str, data):
-        payload = {"event": event, "data": data}
-        await queue.put(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n")
-
-    async def heartbeat():
-        while True:
-            if client_disconnected.is_set():
-                break
-            await asyncio.sleep(10)
-            await queue.put(": keep-alive\n\n")
-
-    async def runner():
-        chat_id = None
-        user_id = None
-        
-        try:
-            # LangChain Agent 초기화
-            from app.langchain_agent import LangChainAgent
-            from app.langchain_tools import get_langchain_tools
-            
-            chat_id = req.chatId or uuid4().hex
-            if req.userInfo:
-                user_id = req.userInfo.get("id")
-            
-            log.info("multiturn chat started", extra={"chat_id": chat_id, "user_id": user_id})
-            
-            # Agent 생성
-            agent = LangChainAgent(model="gpt-4o", temperature=0.2, max_history=10)
-            agent.add_tools(get_langchain_tools())
-            
-            # 사용자 입력 첫 토큰
-            await emit("token", "")
-            
-            streamed_text: list[str] = []
-
-            async def handle_token(token: str):
-                if not token:
-                    return
-                streamed_text.append(token)
-                await emit("token", token)
-
-            try:
-                # Agent로 메시지 처리 (토큰 스트리밍 포함)
-                response, metadata = await agent.process_message(
-                    user_input=req.question,
-                    chat_id=chat_id,
-                    user_id=user_id,
-                    on_token=handle_token
-                )
-
-                # 콜백이 호출되지 않은 경우를 대비한 폴백 처리
-                if not streamed_text and response:
-                    for char in response:
-                        await emit("token", char)
-
-                # 메타데이터 전달
-                await emit("metadata", metadata)
-                
-                log.info("multiturn chat completed", extra={
-                    "chat_id": chat_id,
-                    "total_messages": metadata.get("total_messages", 0),
-                })
-                
-            except Exception as e:
-                log.exception(f"Agent processing failed for chat {chat_id}")
-                error_msg = f"대화 처리 중 오류: {str(e)}"
-                await emit("token", error_msg)
-                await emit("error", str(e))
-        
-        except Exception as e:
-            log.exception("multiturn chat failed")
-            await emit("error", str(e))
-            await emit("token", f"\n\n오류가 발생했습니다: {e}")
-        
-        finally:
-            await emit("result", None)
-            await queue.put(SENTINEL)
-            log.info("multiturn chat finished", extra={"chat_id": chat_id})
-
-    async def sse():
-        producer = asyncio.create_task(runner())
-        pinger = asyncio.create_task(heartbeat())
-        try:
-            while True:
-                if await request.is_disconnected():
-                    client_disconnected.set()
-                    break
-                chunk = await queue.get()
-                if chunk == SENTINEL:
-                    break
-                yield chunk
-        finally:
-            client_disconnected.set()
-            producer.cancel()
-            pinger.cancel()
-
-    return StreamingResponse(
-        sse(), 
-        media_type="text/event-stream", 
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
-    )
-
 
 @router.get("/chat/history/{chat_id}")
 async def get_chat_history(chat_id: str):

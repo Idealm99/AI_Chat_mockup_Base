@@ -69,6 +69,15 @@ export interface StructurePanelData {
   summary?: string;
 }
 
+export interface VisualizationPayload {
+  pdb_url?: string;
+  pdbUrl?: string;
+  pdb_id?: string | null;
+  pdbId?: string | null;
+  target?: string;
+  compound?: string;
+}
+
 export interface LinkageInfo {
   target?: string;
   compound?: string;
@@ -95,6 +104,7 @@ export interface UiPayload {
   knowledgeGraph?: KnowledgeGraphData;
   structure_panel?: StructurePanelData;
   structurePanel?: StructurePanelData;
+  visualization?: VisualizationPayload;
   linkage?: LinkageInfo;
   report_cards?: ReportCard[];
   reportCards?: ReportCard[];

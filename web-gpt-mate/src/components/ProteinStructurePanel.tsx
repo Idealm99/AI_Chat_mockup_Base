@@ -87,6 +87,19 @@ const ProteinStructurePanel = ({ isActive = true, data }: ProteinStructurePanelP
       setStatus("loading");
       setErrorMessage(null);
       setIsDialogOpen(false);
+      setPdbData(null);
+      if (containerRef.current) {
+        containerRef.current.innerHTML = "";
+      }
+      return;
+    }
+    if (!data?.pdbUrl) {
+      setStatus("loading");
+      setErrorMessage(null);
+      setPdbData(null);
+      if (containerRef.current) {
+        containerRef.current.innerHTML = "";
+      }
       return;
     }
     let isCancelled = false;
@@ -98,11 +111,16 @@ const ProteinStructurePanel = ({ isActive = true, data }: ProteinStructurePanelP
       element.innerHTML = "";
 
       try {
-  const viewer = new Mol3D.GLViewer(element, viewerConfig);
+        setStatus("loading");
+        setErrorMessage(null);
+        setPdbData(null);
+
+        const viewer = new Mol3D.GLViewer(element, viewerConfig);
         viewerRef.current = viewer;
 
         let pdbData: string | null = null;
-        const pdbSources = data?.pdbUrl ? [data.pdbUrl] : FALLBACK_PDB_SOURCES;
+        const fallbackSources = FALLBACK_PDB_SOURCES.filter((url) => url !== data.pdbUrl);
+        const pdbSources = [data.pdbUrl, ...fallbackSources];
         for (const source of pdbSources) {
           try {
             const response = await fetch(source, { mode: "cors" });
@@ -124,7 +142,7 @@ const ProteinStructurePanel = ({ isActive = true, data }: ProteinStructurePanelP
           throw new Error("PDB 데이터를 가져오지 못했습니다.");
         }
 
-    setPdbData(pdbData);
+        setPdbData(pdbData);
         viewer.addModel(pdbData, "pdb");
         if (isCancelled) {
           return;
@@ -309,9 +327,12 @@ const ProteinStructurePanel = ({ isActive = true, data }: ProteinStructurePanelP
           />
           <div className="mt-3 text-xs text-emerald-200/80">
             {!isActive && <span>AI 응답이 생성되면 AlphaFold 구조를 불러옵니다.</span>}
-            {isActive && status === "loading" && <span>구조 데이터를 불러오는 중입니다...</span>}
+            {isActive && !data?.pdbUrl && (
+              <span>단백질 구조 URL을 기다리는 중입니다. MCP 결과가 준비되면 자동으로 렌더링합니다.</span>
+            )}
+            {isActive && data?.pdbUrl && status === "loading" && <span>구조 데이터를 불러오는 중입니다...</span>}
             {isActive && status === "error" && (
-              <span className="text-red-300">구조를 불러오지 못했습니다: {errorMessage}</span>
+              <span className="text-red-300">구조를 불러오지 못했습니다: {errorMessage ?? "알 수 없는 오류가 발생했습니다."}</span>
             )}
             {isActive && status === "ready" && (
               <div className="space-y-1 text-emerald-100/80">

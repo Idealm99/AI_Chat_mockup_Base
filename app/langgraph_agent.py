@@ -1,17 +1,26 @@
-
 from __future__ import annotations
 
 import asyncio
 import json
 import os
 from datetime import date, datetime
-from typing import Any, Awaitable, Callable, Dict, List, NotRequired, Optional, Tuple, TypedDict, Union
+from typing import Annotated, Any, Awaitable, Callable, Dict, List, NotRequired, Optional, Tuple, TypedDict, Union
 
 import re
 
 from langgraph.graph import StateGraph, END
-from langchain_core.messages import ToolMessage
+from langgraph.graph.message import add_messages
+from langchain_core.messages import (
+    BaseMessage,
+    HumanMessage,
+    AIMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_core.tools import BaseTool
+from langchain_core.output_parsers import JsonOutputParser
+from pydantic import BaseModel, Field
+from langchain_core.runnables import RunnableConfig
 
 
 try:
@@ -49,7 +58,7 @@ log = get_logger(__name__)
 class GraphState(TypedDict):
     """State shared across the LangGraph workflow."""
 
-    messages: List[Dict[str, str]]
+    messages: Annotated[List[BaseMessage], add_messages]
     original_question: str
     search_iterations: int
     search_results_summary: List[str]
@@ -59,7 +68,7 @@ class GraphState(TypedDict):
     mcp_tool_inputs: NotRequired[Dict[str, Dict[str, Any]]]
     mcp_tool_results: NotRequired[Dict[str, Any]]
     workflow_trace: NotRequired[List[Dict[str, Any]]]
-    history: List[Dict[str, str]]
+    history: Annotated[List[BaseMessage], add_messages]
     next: str
     step_count: int
     rationale: str
@@ -67,6 +76,7 @@ class GraphState(TypedDict):
     _classify_llm_result: NotRequired[str]
     _classify_keyword_match: NotRequired[bool]
     _stage_visit_counts: NotRequired[Dict[str, int]]
+    visualization: NotRequired[Dict[str, Any]]
 
 
 def _current_search_date() -> str:
@@ -82,8 +92,15 @@ def _append_search_date_to_query(query: str, search_date: str) -> str:
     return f"{query} {tag}"
 
 
-def _make_history_entry(role: str, content: str) -> Dict[str, str]:
-    return {"role": role, "content": content or ""}
+def _make_history_entry(role: str, content: str) -> BaseMessage:
+    if role == "user":
+        return HumanMessage(content=content)
+    elif role == "assistant" or role == "ai":
+        return AIMessage(content=content)
+    elif role == "system":
+        return SystemMessage(content=content)
+    else:
+        return BaseMessage(content=content, type=role)
 
 
 
@@ -94,10 +111,10 @@ class LangGraphSearchAgent:
 
     """LangGraph-powered conversational search agent with streaming reasoning events."""
 
-    MAX_STAGE_AGENT_STEPS = 6
+    MAX_STAGE_AGENT_STEPS = 7
     MAX_WORKFLOW_ITERATIONS = 10
     MAX_STAGE_AGENT_TOOLS = 5
-    FALLBACK_TOOL_LIMIT = 1
+    FALLBACK_TOOL_LIMIT = 4
     DEFAULT_RECURSION_LIMIT = 50
 
  
@@ -266,24 +283,42 @@ class LangGraphSearchAgent:
         graph.add_edge("vector_search", "final_answer")
         graph.add_edge("ag_cl_stage", "search_query")
 
-        # 종료 노드
-        graph.add_conditional_edges("final_answer", lambda _: END)
+        # 최종 답변 후 종료
+        graph.add_edge("final_answer", END)
         graph.add_conditional_edges("direct_answer", lambda _: END)
 
         return graph.compile()
+
     async def _search_query_node(self, state: GraphState) -> GraphState:
         """
         MCP 워크플로우 결과를 바탕으로 벡터DB 검색에 사용할 검색어를 생성합니다.
-        간단히 마지막 단계 결과나 질문을 활용(추후 LLM 활용 가능)
+        질문을 영어로 번역하고 핵심 키워드를 추출하여 검색 성능을 높입니다.
         """
-        # 예시: 마지막 워크플로우 결과에서 주요 키워드 추출(여기선 질문 사용)
-        search_query = state.get("original_question", "")
+        original_question = state.get("original_question", "")
+        
+        system_prompt = (
+            "You are a biomedical search query generator. "
+            "Convert the user's question into a specific, keyword-rich English search query "
+            "suitable for retrieving scientific documents from a vector database.\n"
+            "If the input is in Korean, translate it to English.\n"
+            "Output ONLY the search query text, no explanation."
+        )
+        
+        search_query = await self._simple_llm_call(
+            system_prompt=system_prompt,
+            user_prompt=f"User Question: {original_question}",
+            temperature=0.0,
+        )
+        
+        # 따옴표 제거 등 정제
+        search_query = search_query.strip().strip('"').strip("'")
+        
         state["current_search_query"] = search_query
         await self._emit(
             "reasoning",
             {
                 "stage": "search_query",
-                "message": f"벡터DB 검색용 쿼리 생성: {search_query}",
+                "message": f"벡터DB 검색용 쿼리 생성(English): {search_query}",
             },
         )
         return state
@@ -350,16 +385,31 @@ class LangGraphSearchAgent:
             "- '파이썬으로 리스트 정렬하는 법 알려줘' → 일반\n"
             "- '임상시험 승인 절차는?' → 전문\n"
             "- '치킨 맛집 추천해줘' → 일반\n"
-            f"질문: {question}\n답변:"
+            f"질문: {question}\n"
         )
+        
+        parser = JsonOutputParser(pydantic_object=ClassificationDecision)
+        format_instructions = parser.get_format_instructions()
+        
+        full_prompt = f"{system_prompt}\n\n{format_instructions}"
+
         # LLM 호출 (최대한 짧고 명확하게)
-        result = await self._simple_llm_call(
-            system_prompt=system_prompt,
+        response = await self._simple_llm_call(
+            system_prompt=full_prompt,
             user_prompt="",
             temperature=0.0,
         )
-        result = result.strip().replace("\n", "").replace(":", "").replace("답변", "").strip()
-        is_mcp = result.startswith("전문")
+        
+        try:
+            if isinstance(response, str):
+                payload = parser.parse(response)
+            else:
+                payload = response
+            result = payload.get("category", "일반")
+        except Exception:
+            result = "일반"
+
+        is_mcp = result == "전문"
         expert_sim_score = max(fuzz.partial_ratio(k, question) for k in self.PROFESSIONAL_KEYWORDS)
         keyword_match = self._detect_professional_keywords(question)
         if expert_sim_score >= 80 or keyword_match:
@@ -422,61 +472,77 @@ class LangGraphSearchAgent:
         
         # Agent 매핑 정보
         agent_descriptions = {
-            "TV": "TargetAgent - Gene target identification",
-            "PI": "PathwayAgent - Signaling pathway analysis",
-            "CD": "ChemAgent - Compound activity data",
-            "SA": "StructureAgent - 3D structure & binding prediction",
-            "CL": "ClinicalAgent - Clinical/regulatory data review",
-            "AG": "RAG Search - Document retrieval and synthesis"
+            "TV": "TargetAgent - Gene target identification (Find targets associated with disease)",
+            "PI": "PathwayAgent - Signaling pathway analysis (Understand biological mechanisms)",
+            "CD": "ChemAgent - Compound activity data (Find drugs/compounds for targets)",
+            "SA": "StructureAgent - 3D structure & binding prediction (Analyze molecular interactions)",
+            "CL": "ClinicalAgent - Clinical/regulatory data review (Check clinical trial status)",
+            "AG": "RAG Search - Document retrieval and synthesis (Final synthesis or general search)"
         }
 
         format_choices = ", ".join(self.MCP_AGENT_CHOICES)
         visited_info = ", ".join(visited_stages) if visited_stages else "None"
         pending_info = ", ".join(unvisited_agents) if unvisited_agents else "None"
         
+        workflow_trace = state.get("workflow_trace", [])
+        trace_summary = "\n".join(
+            f"- {item.get('stage')}: {item.get('status')} ({item.get('notes', '').strip()[:100]}...)"
+            for item in workflow_trace
+        ) if workflow_trace else "None"
+
         # 간결하고 명확한 프롬프트
         system_prompt = (
-            "You are a biomedical workflow router. Based on the user's question, "
-            "select the MOST CRITICAL next agent to call. Each agent handles a specific analysis stage:\n"
+            "You are a biomedical workflow router. Your goal is to orchestrate a comprehensive analysis pipeline.\n"
+            "Based on the user's question and the progress so far, select the NEXT BEST agent to execute.\n"
+            "Follow this logical progression when possible: Target -> Pathway -> Chem -> Structure -> Clinical.\n\n"
+            "Available Agents:\n"
             + "\n".join(f"- {code}: {desc}" for code, desc in agent_descriptions.items())
-            + "\nIMPORTANT: If you choose AG, ClinicalAgent must run immediately before entering the vector search path."
+            + "\n\nDecision Rules:\n"
+            "1. If a critical dependency is missing (e.g., need a target before finding compounds), prioritize the prerequisite agent.\n"
+            "2. If the user asks about a specific aspect (e.g., 'clinical trials'), ensure prerequisites are met or jump to it if context allows.\n"
+            "3. If all relevant analysis is complete, or if you need to synthesize information, choose 'AG' (RAG Search).\n"
+            "4. Do not repeat completed stages unless new information requires a re-evaluation.\n"
+            "5. If you choose AG, ClinicalAgent must run immediately before entering the vector search path if it hasn't run yet."
         )
         
         user_prompt = (
             f"User Question: {question}\n\n"
-            f"Already visited stages: {visited_info}\n"
-            f"Pending agents: {pending_info}\n\n"
-            f"Choose the next agent code from: {format_choices}\n"
-            f"Respond ONLY with valid JSON:\n"
-            '{"next": "<agent_code>", "visible_rationale": "<brief reason>"}'
+            f"Workflow Status:\n{trace_summary}\n\n"
+            f"Visited Stages: {visited_info}\n"
+            f"Pending Agents: {pending_info}\n\n"
+            f"Select the next agent code from: {format_choices}\n"
         )
+        
+        parser = JsonOutputParser(pydantic_object=MCPClassifierDecision)
+        format_instructions = parser.get_format_instructions()
+        
+        full_user_prompt = f"{user_prompt}\n\n{format_instructions}"
         
         response = await self._simple_llm_call(
             system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            temperature=0.1,  # 더 결정적인 선택을 위해 낮춤
+            user_prompt=full_user_prompt,
+            temperature=0.1,
         )
         
-        # JSON 파싱
-        raw_response = response.strip()
-        cleaned_response = self._clean_json_response(raw_response)
-        rationale = ""
-        next_choice = pending_agent or "TV"  # fallback을 pending_agent로 변경
-        
         try:
-            payload = json.loads(cleaned_response)
+            if isinstance(response, str):
+                payload = parser.parse(response)
+            else:
+                payload = response
+                
             rationale = payload.get("visible_rationale") or payload.get("rationale", "")
             next_choice = payload.get("next", "").strip().upper()
-        except json.JSONDecodeError:
+        except Exception as e:
             log.warning(
-                "MCP classifier JSON parsing failed; using fallback",
+                "MCP classifier parsing failed; using fallback",
                 extra={
-                    "response": raw_response,
-                    "cleaned": cleaned_response,
-                    "fallback": next_choice,
+                    "response": response,
+                    "error": str(e),
+                    "fallback": pending_agent or "TV",
                 },
             )
-            rationale = f"JSON parsing failed; defaulting to {next_choice}."
+            rationale = f"Parsing failed: {e}; defaulting to {pending_agent or 'TV'}."
+            next_choice = pending_agent or "TV"
         
         # Validation
         if next_choice not in self.MCP_AGENT_CHOICES:
@@ -498,7 +564,7 @@ class LangGraphSearchAgent:
 
         state["next"] = next_choice
         state["rationale"] = rationale
-        state["_classify_mcp_raw"] = raw_response
+        state["_classify_mcp_raw"] = str(response)
         agent_label = agent_descriptions.get(next_choice, next_choice)
         next_step_text = f"{agent_label} ({next_choice})" if agent_label != next_choice else next_choice
         reason_text = rationale.strip() if rationale else "모델 판단에 따른 자동 선택입니다."
@@ -732,12 +798,24 @@ class LangGraphSearchAgent:
                 )
                 return state
 
+            # Generate summary of previous results
+            prev_results = []
+            for k, v in state.get("mcp_tool_results", {}).items():
+                if k != stage_title and v:
+                     # Simple truncation to avoid context overflow
+                     v_str = str(v)
+                     if len(v_str) > 500:
+                         v_str = v_str[:500] + "... (truncated)"
+                     prev_results.append(f"[{k}]: {v_str}")
+            previous_findings = "\n".join(prev_results) if prev_results else "None"
+
             agent_outcome = await self._run_stage_agent(
                 stage_key=stage_key,
                 stage_title=stage_title,
                 stage_description=stage_description,
                 query=query,
                 resolved_tools=resolved_tools,
+                previous_findings=previous_findings,
             )
 
             stage_results.update(agent_outcome["results"])
@@ -793,10 +871,10 @@ class LangGraphSearchAgent:
 
     def _append_history(self, state: GraphState, role: str, content: str) -> None:
         entry = _make_history_entry(role, content)
-        state.setdefault("history", []).append(entry)
+        state["history"] = [entry]  # add_messages will handle appending
 
     def _history_text(self, state: GraphState) -> str:
-        return "\n".join(entry.get("content", "") for entry in state.get("history", []))
+        return "\n".join(msg.content if isinstance(msg.content, str) else str(msg.content) for msg in state.get("history", []))
 
     async def _run_stage_agent(
         self,
@@ -806,6 +884,7 @@ class LangGraphSearchAgent:
         stage_description: str,
         query: str,
         resolved_tools: List[ResolvedMCPTool],
+        previous_findings: str = "",
     ) -> Dict[str, Any]:
         tool_map: Dict[str, ResolvedMCPTool] = {
             resolved.tool.name: resolved for resolved in resolved_tools
@@ -838,6 +917,7 @@ class LangGraphSearchAgent:
                 query=query,
                 resolved_tools=resolved_tools,
                 scratchpad=scratchpad,
+                previous_findings=previous_findings,
             )
 
             # LangChain 도구를 OpenAI tools 형식으로 변환
@@ -852,12 +932,17 @@ class LangGraphSearchAgent:
                     "use_tool_schema": use_tool_schema,
                 },
             )
+            
+            parser = JsonOutputParser(pydantic_object=StageAgentDecision)
+            format_instructions = parser.get_format_instructions()
+            
+            full_agent_instruction = f"{agent_instruction}\n\n{format_instructions}"
+
             response_payload = await self._simple_llm_call(
                 system_prompt=(
                     f"You are the specialist agent for the {stage_title} stage. "
-                    "Respond only with JSON that describes your next action."
                 ),
-                user_prompt=agent_instruction,
+                user_prompt=full_agent_instruction,
                 tools=tools_schema if tools_schema else None,
                 return_message=use_tool_schema,
             )
@@ -916,8 +1001,20 @@ class LangGraphSearchAgent:
                     },
                 )
                 try:
-                    decision = json.loads(response_text or "{}")
-                except json.JSONDecodeError:
+                    # JSON 파싱 시도
+                    parsed = parser.parse(response_text or "{}")
+                    
+                    # 파싱된 결과가 StageAgentDecision 모델과 일치하는지 확인
+                    # 특히 action이 call_tool인데 tool_name이 functions. 접두사가 붙어있는 경우 처리
+                    if parsed.get("action") == "call_tool":
+                        tool_name = parsed.get("tool_name", "")
+                        # functions. 접두사 제거 (OpenAI function calling 포맷이 텍스트로 들어온 경우)
+                        if tool_name.startswith("functions."):
+                            tool_name = tool_name.replace("functions.", "")
+                            parsed["tool_name"] = tool_name
+                            
+                    decision = parsed
+                except Exception:
                     decision = {"action": "finish", "summary": (response_text or "").strip()}
 
             log.debug(
@@ -1143,7 +1240,7 @@ class LangGraphSearchAgent:
         log.info(
             f"Fallback executing for {stage_title}",
             extra={
-                "stage": stage_key,
+                "stage_key": stage_key,
                 "query": query,
                 "tool_count": len(ranked_tools),
                 "limit": limit,
@@ -1360,6 +1457,7 @@ class LangGraphSearchAgent:
         query: str,
         resolved_tools: List[ResolvedMCPTool],
         scratchpad: List[Dict[str, Any]],
+        previous_findings: str = "",
     ) -> str:
         tool_sections = []
         for resolved in resolved_tools:
@@ -1397,18 +1495,17 @@ class LangGraphSearchAgent:
         return (
             f"Stage: {stage_title}\nGoal: {stage_description}\n"
             f"User question: {query}\n"
+            f"Context from previous stages:\n{previous_findings}\n\n"
             f"Available MCP tools:\n{''.join(tool_sections)}\n\n"
             "IMPORTANT: You MUST call at least one tool to gather data before finishing.\n"
             "Action guardrails:\n"
             "1. ALWAYS call relevant tools to gather data - do not skip tool usage.\n"
             "2. Execute at most 3 distinct tools for this stage. Start with the most relevant tool.\n"
             "3. Invoke a single tool per step using JSON with proper arguments matching the schema.\n"
-            "4. After gathering tool results, reply with action=\"finish\" and provide a concise summary.\n\n"
-            "Output format (respond ONLY with valid JSON):\n"
-            'For tool call: {"action": "call_tool", "tool_name": "<exact_tool_name>", "arguments": {<schema_fields>}}\n'
-            'For finishing: {"action": "finish", "summary": "<brief summary of findings>"}\n\n'
+            "4. Use context from previous stages (e.g., identified targets, compounds) to inform your tool arguments.\n"
+            "5. CRITICAL: All tool arguments (especially search queries, gene names, disease names) MUST be in English. If the user input is in Korean, translate it to English for the tool input.\n"
+            "6. After gathering tool results, reply with action=\"finish\" and provide a concise summary.\n\n"
             f"Progress so far:\n{history_text}\n\n"
-            "Your response (JSON only):"
         )
 
     # Legacy MCP tool-node helpers (removed)
@@ -1429,7 +1526,7 @@ class LangGraphSearchAgent:
         last_messages = state["messages"]
 
         prompt_messages = [
-            {"role": "system", "content": self._system_prompt()},
+            SystemMessage(content=self._system_prompt()),
             *last_messages,
         ]
 
@@ -1442,8 +1539,8 @@ class LangGraphSearchAgent:
         )
 
         final_message = await self._stream_answer(prompt_messages)
-        state["messages"].append(final_message)
-        state["final_answer"] = final_message.get("content", "")
+        state["messages"] = [final_message]
+        state["final_answer"] = final_message.content if isinstance(final_message.content, str) else str(final_message.content)
         return state
 
     async def _final_answer_node(self, state: GraphState) -> GraphState:
@@ -1504,24 +1601,22 @@ class LangGraphSearchAgent:
         )
 
         messages = [
-            {
-                "role": "system",
-                "content": (
+            SystemMessage(
+                content=(
                     "당신은 바이오/신약 개발 전문 어시스턴트입니다. "
                     "아래 단계별 MCP 데이터를 기반으로 일관된 연구 보고서를 작성하세요. "
                     "각 단계(타겟 발굴 → 오믹스 분석 → 경로 분석 → 화합물 탐색 → 구조 분석 → 임상 정보)를 모두 언급하고 "
                     "사용된 MCP 데이터의 한계나 후속 조치도 제안하세요."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
+                )
+            ),
+            HumanMessage(
+                content=(
                     f"질문: {user_question}\n\n"
                     f"워크플로우 개요:\n{workflow_overview}\n\n"
                     + (f"단계별 주요 메모:\n{trace_summary}\n\n" if trace_summary else "")
                     + f"세부 데이터:\n{context}"
-                ),
-            },
+                )
+            ),
         ]
 
         await self._emit(
@@ -1533,11 +1628,8 @@ class LangGraphSearchAgent:
         )
 
         final_message = await self._stream_answer(messages)
-        state["messages"].append(final_message)
-        state["final_answer"] = final_message.get("content", "")
-        ui_payload = self._build_ui_payload(state)
-        if ui_payload:
-            await self._emit("ui_payload", ui_payload)
+        state["messages"] = [final_message]
+        state["final_answer"] = final_message.content if isinstance(final_message.content, str) else str(final_message.content)
         return state
 
     @staticmethod
@@ -1612,10 +1704,10 @@ class LangGraphSearchAgent:
 
     async def _stream_answer(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[BaseMessage],
         *,
         tools: Optional[List[Dict[str, Any]]] = None,
-    ) -> Dict[str, Any]:
+    ) -> BaseMessage:
         final_message: Optional[Dict[str, Any]] = None
         async for chunk in call_llm_stream(
             messages=messages,
@@ -1627,9 +1719,13 @@ class LangGraphSearchAgent:
                 await self._emit("token", chunk.get("data", ""))
             else:
                 final_message = chunk
+        
         if final_message is None:
-            final_message = {"role": "assistant", "content": ""}
-        return final_message
+            return AIMessage(content="")
+        
+        content = final_message.get("content", "")
+        tool_calls = final_message.get("tool_calls") or []
+        return AIMessage(content=content, tool_calls=tool_calls)
 
     async def _simple_llm_call(
         self,
@@ -1677,7 +1773,7 @@ class LangGraphSearchAgent:
             return None
 
         target_name, compound_name = self._infer_target_and_compound(state)
-        structure_panel = self._build_structure_panel(workflow_results, target_name, compound_name)
+        structure_panel = self._build_structure_panel(workflow_results, target_name, compound_name, state)
         linkage_info = self._build_linkage_info(workflow_results, compound_name, target_name)
         knowledge_graph = self._build_knowledge_graph_payload(target_name, compound_name)
         report_cards = self._build_report_cards(state, target_name, compound_name, structure_panel)
@@ -1687,6 +1783,8 @@ class LangGraphSearchAgent:
             payload["knowledge_graph"] = knowledge_graph
         if structure_panel:
             payload["structure_panel"] = structure_panel
+        if state.get("visualization"):
+            payload["visualization"] = state["visualization"]
         if linkage_info:
             payload["linkage"] = linkage_info
         if report_cards:
@@ -1723,23 +1821,65 @@ class LangGraphSearchAgent:
         workflow_results: Dict[str, Dict[str, Any]],
         target_name: str,
         compound_name: str,
+        state: GraphState,
     ) -> Optional[Dict[str, Any]]:
+        state.pop("visualization", None)
         stage_payload = (
             workflow_results.get("StructureAgent")
             or workflow_results.get("Structureagent")
             or workflow_results.get("Structure")
         )
-        text_blob = self._flatten_stage_payload(stage_payload) if stage_payload else ""
-        pdb_url = self._extract_first_match(text_blob, r"https?://[^\s\"']+\.pdb\b")
-        binding_image = self._extract_first_match(text_blob, r"https?://[^\s\"']+\.(?:png|jpg|jpeg)")
-        binding_pocket = "Switch-II pocket" if "switch" in text_blob.lower() else "Active site"
+
+        resolved_target, resolved_compound = self._extract_protein_and_compound_from_results(state)
+        if resolved_target:
+            target_name = resolved_target
+        if resolved_compound:
+            compound_name = resolved_compound
+
+        payload_details = self._extract_structure_payload_details(stage_payload)
+        pdb_url = payload_details.get("pdb_url")
+        binding_image = payload_details.get("binding_image")
+        binding_pocket = payload_details.get("binding_pocket")
+        summary = payload_details.get("summary")
+        pdb_id = payload_details.get("pdb_id")
+        target_name = payload_details.get("target") or target_name
+        compound_name = payload_details.get("compound") or compound_name
+
+        text_blob: Optional[str] = None
+
+        def _get_text_blob() -> str:
+            nonlocal text_blob
+            if text_blob is None and stage_payload:
+                text_blob = self._flatten_stage_payload(stage_payload)
+            return text_blob or ""
+
+        if not pdb_url and stage_payload:
+            blob = _get_text_blob()
+            pdb_url = self._extract_first_match(blob, r"https?://[^\s\"']+\.pdb\b")
+            if not binding_image:
+                binding_image = self._extract_first_match(blob, r"https?://[^\s\"']+\.(?:png|jpg|jpeg)")
+            if not binding_pocket:
+                binding_pocket = "Switch-II pocket" if "switch" in blob.lower() else "Active site"
+
+        if not pdb_id and stage_payload:
+            blob = _get_text_blob()
+            pdb_id = self._extract_pdb_id_from_text(blob)
+
+        if not pdb_url and pdb_id:
+            pdb_url = f"https://files.rcsb.org/download/{pdb_id.upper()}.pdb"
+
+        if not binding_pocket:
+            binding_pocket = "Active site"
 
         if not pdb_url:
-            pdb_url = "https://files.rcsb.org/download/8AW3.pdb"
-        pdb_id_match = re.search(r"/([0-9A-Za-z]{4})\.pdb", pdb_url)
-        pdb_id = pdb_id_match.group(1).upper() if pdb_id_match else None
+            log.info("StructureAgent results did not include a pdbUrl; skipping structure panel")
+            return None
 
-        return {
+        if not pdb_id:
+            pdb_id_match = re.search(r"/([0-9A-Za-z]{4})\.pdb", pdb_url)
+            pdb_id = pdb_id_match.group(1).upper() if pdb_id_match else None
+
+        panel_payload: Dict[str, Any] = {
             "target": target_name,
             "compound": compound_name,
             "bindingPocket": binding_pocket,
@@ -1747,6 +1887,115 @@ class LangGraphSearchAgent:
             "pdbId": pdb_id,
             "bindingModeImage": binding_image,
         }
+        if summary:
+            panel_payload["summary"] = summary
+
+        visualization_payload = {
+            "pdb_url": pdb_url,
+            "pdb_id": pdb_id,
+            "target": target_name,
+            "compound": compound_name,
+        }
+        state["visualization"] = {k: v for k, v in visualization_payload.items() if v}
+
+        return panel_payload
+
+    def _extract_structure_payload_details(
+        self,
+        stage_payload: Optional[Dict[str, Any]],
+    ) -> Dict[str, Optional[str]]:
+        details: Dict[str, Optional[str]] = {
+            "pdb_url": None,
+            "pdb_id": None,
+            "binding_image": None,
+            "binding_pocket": None,
+            "summary": None,
+            "target": None,
+            "compound": None,
+        }
+
+        if not stage_payload:
+            return details
+
+        def _walk(value: Any):
+            if isinstance(value, dict):
+                yield value
+                for nested in value.values():
+                    yield from _walk(nested)
+            elif isinstance(value, list):
+                for item in value:
+                    yield from _walk(item)
+
+        def _assign(key: str, value: Optional[str]) -> None:
+            if value and not details[key]:
+                details[key] = value
+
+        def _normalize_pdb_url(value: Any) -> Optional[str]:
+            if not isinstance(value, str):
+                return None
+            text = value.strip()
+            if not text:
+                return None
+            if text.startswith("http") and ".pdb" in text.lower():
+                return text
+            return self._extract_first_match(text, r"https?://[^\s\"']+\.pdb[^\s\"']*")
+
+        image_pattern = r"https?://[^\s\"']+\.(?:png|jpg|jpeg)"
+
+        for entry in _walk(stage_payload):
+            if not isinstance(entry, dict):
+                continue
+
+            pdb_url = (
+                _normalize_pdb_url(entry.get("pdbUrl"))
+                or _normalize_pdb_url(entry.get("pdb_url"))
+                or _normalize_pdb_url(entry.get("structureUrl"))
+                or _normalize_pdb_url(entry.get("url"))
+            )
+            _assign("pdb_url", pdb_url)
+
+            image_url = (
+                entry.get("bindingModeImage")
+                or entry.get("binding_image")
+                or entry.get("imageUrl")
+                or entry.get("image")
+            )
+            if isinstance(image_url, str) and not details["binding_image"]:
+                normalized_image = self._extract_first_match(image_url, image_pattern)
+                _assign("binding_image", normalized_image or image_url)
+
+            _assign("pdb_id", entry.get("pdbId") or entry.get("pdb_id"))
+            _assign("binding_pocket", entry.get("bindingPocket") or entry.get("pocket") or entry.get("bindingSite"))
+            _assign("summary", entry.get("summary") or entry.get("description") or entry.get("details"))
+            _assign("target", entry.get("target") or entry.get("gene") or entry.get("geneName") or entry.get("uniprotAccession") or entry.get("uniprotId"))
+            _assign("compound", entry.get("compound") or entry.get("ligand") or entry.get("moleculeName") or entry.get("compoundName"))
+
+            if details["pdb_url"] and details["target"] and details["compound"]:
+                break
+
+        return details
+
+    @staticmethod
+    def _extract_pdb_id_from_text(text: str) -> Optional[str]:
+        if not text:
+            return None
+
+        prioritized_patterns = [
+            r"(?:pdb|structure)\s*(?:id|code)?\s*[:#]?\s*([0-9][A-Za-z0-9]{3})",
+            r"\b([0-9][A-Za-z0-9]{3})\b",
+        ]
+
+        for pattern in prioritized_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if not match:
+                continue
+            candidate = (match.group(1) or "").upper()
+            if not candidate or candidate.isdigit():
+                continue
+            if not re.fullmatch(r"[0-9][A-Za-z0-9]{3}", candidate):
+                continue
+            return candidate
+        return None
 
     def _build_linkage_info(
         self,
@@ -1895,19 +2144,116 @@ class LangGraphSearchAgent:
                 return True
         return False
 
+    def _extract_protein_and_compound_from_results(
+        self, state: GraphState
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Extract target protein and compound names from MCP workflow results.
+        Prioritizes StructureAgent > TargetAgent > ChemAgent results.
+        Returns: (target_protein, compound_name) tuple
+        """
+        message = state.get("messages", "")
+        mcp_results = state.get("mcp_tool_results", {})
+        if not mcp_results:
+            return (None, None)
+
+        target_protein: Optional[str] = None
+        compound_name: Optional[str] = None
+
+        # Priority 1: Check StructureAgent results (most specific)
+        structure_results = mcp_results.get("StructureAgent", {})
+        if structure_results:
+            # Try to extract UniProt ID or protein name from AlphaFold/PDB results
+            for tool_name, tool_data in structure_results.items():
+                if not tool_data:
+                    continue
+                data_list = tool_data if isinstance(tool_data, list) else [tool_data]
+                for item in data_list:
+                    if isinstance(item, dict):
+                        # Check for UniProt ID
+                        uniprot_id = (
+                            item.get("uniprotAccession")
+                            or item.get("uniprotId")
+                            or item.get("uniprot_id")
+                        )
+                        if uniprot_id and not target_protein:
+                            target_protein = uniprot_id
+                        # Check for gene/protein name
+                        gene_name = item.get("gene") or item.get("geneName")
+                        if gene_name and not target_protein:
+                            target_protein = gene_name
+
+        # Priority 2: Check TargetAgent results
+        if not target_protein:
+            target_results = mcp_results.get("TargetAgent", {})
+            if target_results:
+                for tool_name, tool_data in target_results.items():
+                    if not tool_data:
+                        continue
+                    data_list = tool_data if isinstance(tool_data, list) else [tool_data]
+                    for item in data_list:
+                        if isinstance(item, dict):
+                            # Extract target gene symbol
+                            gene = (
+                                item.get("targetSymbol")
+                                or item.get("target_symbol")
+                                or item.get("gene")
+                                or item.get("approvedSymbol")
+                            )
+                            if gene:
+                                target_protein = gene
+                                break
+                    if target_protein:
+                        break
+
+        # Priority 3: Check ChemAgent results for compound
+        chem_results = mcp_results.get("ChemAgent", {})
+        if chem_results:
+            for tool_name, tool_data in chem_results.items():
+                if not tool_data:
+                    continue
+                data_list = tool_data if isinstance(tool_data, list) else [tool_data]
+                for item in data_list:
+                    if isinstance(item, dict):
+                        # Extract compound name
+                        compound = (
+                            item.get("moleculeName")
+                            or item.get("molecule_name")
+                            or item.get("compound_name")
+                            or item.get("compoundName")
+                            or item.get("preferredName")
+                            or item.get("drugName")
+                        )
+                        if compound:
+                            compound_name = compound
+                            break
+                if compound_name:
+                    break
+
+        log.info(
+            "Extracted protein/compound from workflow",
+            extra={
+                "target_protein": target_protein,
+                "compound_name": compound_name,
+            },
+        )
+
+        return (target_protein, compound_name)
+
     async def run(
         self,
         *,
         question: str,
-        history: List[Dict[str, str]] | None = None,
+        history: List[BaseMessage] | None = None,
+        config: Optional[RunnableConfig] = None,
     ) -> GraphState:
         initial_messages = [
             *(history or []),
-            {"role": "user", "content": question},
+            HumanMessage(content=question),
         ]
         initial_state: GraphState = {
             "messages": initial_messages,
-            "history": [_make_history_entry(entry.get("role", "user"), entry.get("content", "")) for entry in initial_messages],
+            "history": initial_messages,
             "next": "",
             "step_count": 0,
             "rationale": "",
@@ -1922,9 +2268,13 @@ class LangGraphSearchAgent:
             "_stage_visit_counts": {},
         }
 
+        run_config = config or {"recursion_limit": self.DEFAULT_RECURSION_LIMIT}
+        if "recursion_limit" not in run_config:
+            run_config["recursion_limit"] = self.DEFAULT_RECURSION_LIMIT
+
         result_state: GraphState = await self._graph.ainvoke(
             initial_state,
-            config={"recursion_limit": self.DEFAULT_RECURSION_LIMIT},
+            config=run_config,
         )
         return result_state
 
@@ -1978,3 +2328,18 @@ class LangGraphSearchAgent:
             self._vectordb_enabled = False  # 실패 시 재시도 방지
 
         return self._vectordb
+
+
+class StageAgentDecision(BaseModel):
+    action: str = Field(description="The action to take: 'call_tool' or 'finish'")
+    tool_name: Optional[str] = Field(description="The name of the tool to call if action is 'call_tool'")
+    arguments: Optional[Dict[str, Any]] = Field(description="The arguments for the tool call")
+    summary: Optional[str] = Field(description="A brief summary of findings if action is 'finish'")
+
+
+class MCPClassifierDecision(BaseModel):
+    next: str = Field(description="The next agent code to call")
+    visible_rationale: str = Field(description="A brief reason for the choice")
+
+class ClassificationDecision(BaseModel):
+    category: str = Field(description="The category of the question: '전문' or '일반'")
