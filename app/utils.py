@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 from openai import AsyncOpenAI
 import aiohttp
 import requests
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
 
 from app.logger import get_logger
 
@@ -122,38 +123,51 @@ def _get_genos_bearer_token() -> str:
 
 
 async def call_llm_stream(
-    messages: list[dict],
+    messages: list[dict | BaseMessage],
     model: str | None = None,
     tools: list[dict] | None = None,
     temperature: float | None = None,
     **kwargs
 ):
     """
-    LLM 스트리밍 호출 (GenOS 또는 OpenAI 직접 사용)
-    GenOS LLM 서빙이 설정되어 있으면 GenOS를 통해 호출하고,
-    그렇지 않으면 OpenAI API를 직접 사용합니다.
+    OpenAI API를 통해 LLM 스트리밍 호출
     """
-    # GenOS LLM 서빙 사용 여부 확인
     if _use_genos_llm():
-        log.info("GenOS를 통해 LLM 호출 시작")
-        try:
-            async for item in _call_genos_llm_stream(messages, model, tools, temperature, **kwargs):
-                yield item
-            return
-        except Exception as e:
-            # GenOS 호출 중 오류가 발생하면 경고를 남기고 OpenAI로 폴백합니다.
-            log.warning("GenOS LLM 호출 중 오류 발생, OpenAI로 폴백합니다: %s", e)
-            # continue해서 아래 OpenAI 호출 블록으로 이어지게 함
-    
-    # 기존 OpenAI 직접 호출
-    log.info("OpenAI API 직접 호출 (GenOS 미사용)")
+        async for res in _call_genos_llm_stream(
+            messages=messages,
+            model=model,
+            tools=tools,
+            temperature=temperature,
+            **kwargs
+        ):
+            yield res
+        return
+
     client = _get_openai_client()
     model = model or _get_default_model()
     
     # OpenAI API 형식에 맞게 메시지 준비
     api_messages = []
     for msg in messages:
-        if isinstance(msg, dict):
+        if isinstance(msg, BaseMessage):
+            if isinstance(msg, HumanMessage):
+                api_messages.append({"role": "user", "content": msg.content})
+            elif isinstance(msg, AIMessage):
+                api_msg = {"role": "assistant", "content": msg.content}
+                if msg.tool_calls:
+                    api_msg["tool_calls"] = msg.tool_calls
+                api_messages.append(api_msg)
+            elif isinstance(msg, SystemMessage):
+                api_messages.append({"role": "system", "content": msg.content})
+            elif isinstance(msg, ToolMessage):
+                api_messages.append({
+                    "role": "tool",
+                    "content": msg.content,
+                    "tool_call_id": msg.tool_call_id
+                })
+            else:
+                api_messages.append({"role": msg.type, "content": msg.content})
+        elif isinstance(msg, dict):
             role = msg.get("role")
             if role == "tool":
                 # tool 메시지는 tool_call_id가 필요
@@ -167,6 +181,8 @@ async def call_llm_stream(
                     "role": role,
                     "content": msg.get("content", ""),
                 }
+                if "tool_calls" in msg:
+                    api_msg["tool_calls"] = msg["tool_calls"]
             api_messages.append(api_msg)
     
     # OpenAI API 호출 파라미터
@@ -343,6 +359,24 @@ async def _call_genos_llm_stream(
                     "content": msg.get("content", ""),
                 }
             api_messages.append(api_msg)
+        elif isinstance(msg, BaseMessage):
+            if isinstance(msg, HumanMessage):
+                api_messages.append({"role": "user", "content": msg.content})
+            elif isinstance(msg, AIMessage):
+                api_msg = {"role": "assistant", "content": msg.content}
+                if msg.tool_calls:
+                    api_msg["tool_calls"] = msg.tool_calls
+                api_messages.append(api_msg)
+            elif isinstance(msg, SystemMessage):
+                api_messages.append({"role": "system", "content": msg.content})
+            elif isinstance(msg, ToolMessage):
+                api_messages.append({
+                    "role": "tool",
+                    "content": msg.content,
+                    "tool_call_id": msg.tool_call_id
+                })
+            else:
+                api_messages.append({"role": msg.type, "content": msg.content})
     
     # 요청 파라미터 구성
     request_data: dict[str, Any] = {

@@ -3,7 +3,8 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Union
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 from app.logger import get_logger
 
 log = get_logger(__name__)
@@ -212,3 +213,22 @@ class ChatHistoryStore:
         except Exception as e:
             log.error(f"Failed to get session count: {e}")
             return 0
+    
+    async def get_chat_history_as_messages(self, chat_id: str, limit: int = 10) -> List[BaseMessage]:
+        """
+        특정 채팅 세션의 메시지 히스토리를 LangChain 메시지 객체 리스트로 조회
+        """
+        history = await self.get_chat_history(chat_id, limit)
+        messages = []
+        for msg in history:
+            role = msg.get("role")
+            content = msg.get("content", "")
+            if role == "user":
+                messages.append(HumanMessage(content=content))
+            elif role == "assistant" or role == "ai":
+                messages.append(AIMessage(content=content))
+            elif role == "system":
+                messages.append(SystemMessage(content=content))
+            else:
+                messages.append(BaseMessage(content=content, type=role))
+        return messages

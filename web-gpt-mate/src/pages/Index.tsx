@@ -559,10 +559,24 @@ const Index = () => {
     () => uiPayload?.knowledge_graph ?? uiPayload?.knowledgeGraph ?? null,
     [uiPayload],
   );
-  const structurePanelData = useMemo<StructurePanelData | null>(
-    () => uiPayload?.structure_panel ?? uiPayload?.structurePanel ?? null,
-    [uiPayload],
-  );
+  const structurePanelData = useMemo<StructurePanelData | null>(() => {
+    const direct = uiPayload?.structure_panel ?? uiPayload?.structurePanel ?? null;
+    const visualization = uiPayload?.visualization;
+    if (direct?.pdbUrl || !visualization) {
+      return direct;
+    }
+    const vizUrl = visualization?.pdb_url ?? visualization?.pdbUrl;
+    if (!vizUrl) {
+      return direct;
+    }
+    return {
+      ...direct,
+      pdbUrl: vizUrl,
+      pdbId: visualization?.pdb_id ?? visualization?.pdbId ?? direct?.pdbId,
+      target: direct?.target ?? visualization?.target,
+      compound: direct?.compound ?? visualization?.compound,
+    };
+  }, [uiPayload]);
   const toolUsageGroups = useMemo(() => {
     type LogWithPosition = ToolLog & { __position: number };
     const rawLogs = latestReasoning
