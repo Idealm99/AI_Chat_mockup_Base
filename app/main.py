@@ -10,7 +10,7 @@ from app.api.health import router as health_router
 from app.api.chat import router as chat_router
 from app.api.mcp import router as mcp_router
 from app.api.mcp_chat import router as mcp_chat_router
-from app.api.one_agent import router as one_agent_router
+
 from app.logger import setup_logging, get_logger
 
 
@@ -35,7 +35,7 @@ app.include_router(mcp_router, prefix="/api", tags=["mcp"])
 app.include_router(mcp_chat_router, prefix="/api", tags=["mcp_chat"])
 
 # Add one_agent router
-app.include_router(one_agent_router, prefix="/api", tags=["one_agent"])
+
 
 
 

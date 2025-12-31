@@ -45,6 +45,7 @@ interface AppSidebarProps {
   onRefreshMcp?: () => void;
   selectedMcpIds?: string[];
   onSelectMcp?: (serverName: string) => void;
+  hideWorkspace?: boolean;
 }
 
 export function AppSidebar({
@@ -62,6 +63,7 @@ export function AppSidebar({
   onRefreshMcp,
   selectedMcpIds,
   onSelectMcp,
+  hideWorkspace = false,
 }: AppSidebarProps) {
   const { open } = useSidebar();
   const selectedSet = useMemo(() => new Set(selectedMcpIds ?? []), [selectedMcpIds]);
@@ -118,7 +120,7 @@ export function AppSidebar({
   const formatServerDetails = (server: McpServerStatus) => server.message ?? `${server.tool_count ?? 0} tools available`;
 
   return (
-  <Sidebar collapsible="icon" className="max-w-[19.2rem] border-r border-slate-800/70 bg-slate-950/70 text-slate-200">
+  <Sidebar collapsible="icon" className="max-w-[19.2rem] border-r border-slate-800/70 bg-black text-slate-200 [&>div]:bg-black">
       <SidebarContent>
         <SidebarGroup>
           <div className="px-3 py-2">
@@ -152,35 +154,37 @@ export function AppSidebar({
           </SidebarGroupContent>
         </SidebarGroup>
 
-        <SidebarGroup>
-          <SidebarGroupLabel className="text-[10px] uppercase tracking-[0.25em] text-slate-500">
-            Workspace
-          </SidebarGroupLabel>
-          <SidebarGroupContent>
-            <SidebarMenu>
-              {workspaceOptions.map((option) => (
-                <SidebarMenuItem key={option.key}>
-                  <SidebarMenuButton
-                    onClick={() => onChangeWorkspace(option.key)}
-                    className={cn(
-                      "flex w-full items-center gap-3 rounded-xl border border-transparent bg-slate-900/40 px-3 py-3 text-left text-sm text-slate-200 transition hover:border-cyan-500/40 hover:bg-slate-900/70",
-                      activeWorkspace === option.key &&
-                        "border-cyan-500/40 bg-cyan-500/10 text-cyan-100 shadow-[0_10px_35px_-20px_rgba(34,211,238,0.65)]",
-                    )}
-                  >
-                    <option.icon className="h-4 w-4 text-cyan-300" />
-                    {open && (
-                      <div className="flex-1">
-                        <div className="text-sm font-semibold">{option.label}</div>
-                        <p className="text-xs text-slate-500">{option.description}</p>
-                      </div>
-                    )}
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              ))}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
+        {!hideWorkspace && (
+          <SidebarGroup>
+            <SidebarGroupLabel className="text-[10px] uppercase tracking-[0.25em] text-slate-500">
+              Workspace
+            </SidebarGroupLabel>
+            <SidebarGroupContent>
+              <SidebarMenu>
+                {workspaceOptions.map((option) => (
+                  <SidebarMenuItem key={option.key}>
+                    <SidebarMenuButton
+                      onClick={() => onChangeWorkspace(option.key)}
+                      className={cn(
+                        "flex w-full items-center gap-3 rounded-xl border border-transparent bg-slate-900/40 px-3 py-3 text-left text-sm text-slate-200 transition hover:border-cyan-500/40 hover:bg-slate-900/70",
+                        activeWorkspace === option.key &&
+                          "border-cyan-500/40 bg-cyan-500/10 text-cyan-100 shadow-[0_10px_35px_-20px_rgba(34,211,238,0.65)]",
+                      )}
+                    >
+                      <option.icon className="h-4 w-4 text-cyan-300" />
+                      {open && (
+                        <div className="flex-1">
+                          <div className="text-sm font-semibold">{option.label}</div>
+                          <p className="text-xs text-slate-500">{option.description}</p>
+                        </div>
+                      )}
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                ))}
+              </SidebarMenu>
+            </SidebarGroupContent>
+          </SidebarGroup>
+        )}
 
         <SidebarGroup>
           <SidebarGroupLabel className="text-[10px] uppercase tracking-[0.25em] text-slate-500">

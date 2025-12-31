@@ -16,6 +16,7 @@ import {
   Radar,
   GitBranch,
   CalendarClock,
+  Bot,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -233,10 +234,10 @@ const Dashboard = () => {
             variant="ghost"
             size="icon"
             className="text-muted-foreground hover:bg-muted/50"
-            onClick={() => handlePortalNavigate("/prompt-hub")}
-            aria-label="Prompt Hub"
+            onClick={() => handlePortalNavigate("/one-agent")}
+            aria-label="One Agent"
           >
-            <Sparkles className="h-5 w-5" />
+            <Bot className="h-5 w-5" />
           </Button>
           <Button
             variant="ghost"
