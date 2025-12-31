@@ -99,7 +99,8 @@ async def chat_stream(
                 if role == "user":
                     persisted.append(HumanMessage(content=content))
                 elif role == "assistant":
-                    persisted.append(AIMessage(content=content, tool_calls=msg.get("tool_calls")))
+                    tool_calls_data = msg.get("tool_calls")
+                    persisted.append(AIMessage(content=content, tool_calls=tool_calls_data if tool_calls_data else []))
                 elif role == "system":
                     persisted.append(SystemMessage(content=content))
                 elif role == "tool":
@@ -150,7 +151,7 @@ async def chat_stream(
                     content = final_message.get("content", "")
                     tool_calls = final_message.get("tool_calls")
                     if role == "assistant":
-                        msg_obj = AIMessage(content=content, tool_calls=tool_calls)
+                        msg_obj = AIMessage(content=content, tool_calls=tool_calls if tool_calls else [])
                     elif role == "user":
                         msg_obj = HumanMessage(content=content)
                     elif role == "system":
@@ -364,19 +365,38 @@ async def chat_langgraph(
     async def runner():
         chat_id = req.chatId or uuid4().hex
         user_id = req.userInfo.get("id") if req.userInfo else None
+        usage_summary: dict | None = None
+        reasoning_events: list[dict] = []
+        tool_events: list[dict] = []
+        latest_ui_payload: dict | None = None
+        references_payload: list[dict] = []
 
         try:
             await emit("token", "")
 
             history_messages = await history_store.get_chat_history_as_messages(chat_id, limit=10)
 
-            await history_store.save_message(chat_id, "user", req.question)
+            await history_store.save_message(
+                chat_id,
+                "user",
+                req.question,
+                user_id=user_id,
+                title=req.question,
+            )
 
             agent = LangGraphSearchAgent()
 
             async def agent_emit(event: str, data):
+                nonlocal latest_ui_payload
                 if client_disconnected.is_set():
                     return
+                timestamp = datetime.utcnow().isoformat()
+                if event == "reasoning" and data is not None:
+                    reasoning_events.append({"timestamp": timestamp, "data": data})
+                elif event == "tool_use" and data is not None:
+                    tool_events.append({"timestamp": timestamp, "data": data})
+                elif event == "ui_payload" and isinstance(data, dict):
+                    latest_ui_payload = data
                 await emit(event, data)
 
             agent.set_emitter(agent_emit)
@@ -384,8 +404,12 @@ async def chat_langgraph(
             final_state = await agent.run(question=req.question, history=history_messages)
 
             final_answer = final_state.get("final_answer") or ""
-            if final_answer.strip():
-                await history_store.save_message(chat_id, "assistant", final_answer)
+            final_usage = final_state.get("final_usage")
+            final_cost = final_state.get("final_cost")
+
+            ui_payload = agent._build_ui_payload(final_state)
+            if ui_payload:
+                await agent_emit("ui_payload", ui_payload)
 
             document_results = final_state.get("document_results") or []
 
@@ -402,7 +426,7 @@ async def chat_langgraph(
                     "content_snippet": content,
                 }
 
-            references_payload = [ref for ref in ( _format_reference(item) for item in document_results ) if ref]
+            references_payload = [ref for ref in (_format_reference(item) for item in document_results) if ref]
 
             await emit("document_references", {"documents": references_payload})
 
@@ -413,6 +437,31 @@ async def chat_langgraph(
                 "summaries": final_state.get("search_results_summary", []),
             })
 
+            if final_usage or final_cost is not None:
+                usage_summary = {}
+                if final_usage:
+                    usage_summary["usage"] = final_usage
+                if final_cost is not None:
+                    usage_summary["cost"] = final_cost
+                await history_store.update_session_usage(chat_id, final_usage, final_cost)
+
+            assistant_metadata = {
+                "reasoning": reasoning_events,
+                "tool_logs": tool_events,
+                "references": references_payload,
+                "ui_payload": latest_ui_payload or ui_payload,
+                "usage": final_usage,
+                "cost": final_cost,
+            }
+
+            await history_store.save_message(
+                chat_id,
+                "assistant",
+                final_answer,
+                user_id=user_id,
+                metadata=assistant_metadata,
+            )
+
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -420,7 +469,7 @@ async def chat_langgraph(
             await emit("error", str(e))
             await emit("token", f"\n\n오류가 발생했습니다: {e}")
         finally:
-            await emit("result", None)
+            await emit("result", usage_summary)
             await queue.put(SENTINEL)
             log.info("langgraph chat finished", extra={"chat_id": chat_id})
 
@@ -448,12 +497,12 @@ async def chat_langgraph(
     )
 
 @router.get("/chat/history/{chat_id}")
-async def get_chat_history(chat_id: str):
+async def get_chat_history(chat_id: str, limit: int = 50):
     """
-    특정 채팅 세션의 히스토리 조회 (최대 10개 메시지)
+    특정 채팅 세션의 히스토리 조회 (최근 limit개 메시지)
     """
     try:
-        messages = await history_store.get_chat_history(chat_id, limit=10)
+        messages = await history_store.get_chat_history(chat_id, limit=limit)
         return {
             "chat_id": chat_id,
             "messages": messages,
@@ -462,6 +511,16 @@ async def get_chat_history(chat_id: str):
     except Exception as e:
         log.exception(f"Failed to get chat history: {e}")
         return {"error": str(e), "chat_id": chat_id, "messages": []}
+
+
+@router.get("/chat/sessions")
+async def list_chat_sessions(limit: int = 50, user_id: str | None = None):
+    try:
+        summaries = await history_store.list_sessions(user_id=user_id, limit=limit)
+        return {"sessions": summaries}
+    except Exception as e:
+        log.exception("Failed to list chat sessions")
+        return {"sessions": [], "error": str(e)}
 
 
 @router.delete("/chat/history/{chat_id}")

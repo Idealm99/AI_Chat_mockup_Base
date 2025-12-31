@@ -55,7 +55,7 @@ const ToolUsagePanel = ({ groups, isActive }: ToolUsagePanelProps) => {
                   <p className="text-xs text-slate-400">{group.logs.length} tool{group.logs.length > 1 ? "s" : ""} executed</p>
                 </div>
               </div>
-              <div className="mt-3 flex flex-wrap gap-2">
+              <div className="mt-3 flex flex-col gap-2">
                 {group.logs.map((log) => {
                   const label = log.name || log.rawToolName || "Unnamed Tool";
                   const subLabel = [log.serverName, formatTimestamp(log.timestamp)].filter(Boolean).join(" · ");
@@ -64,7 +64,7 @@ const ToolUsagePanel = ({ groups, isActive }: ToolUsagePanelProps) => {
                       key={log.id}
                       variant="outline"
                       size="sm"
-                      className="h-auto rounded-xl border-cyan-400/50 bg-cyan-500/10 px-3 py-1 text-left text-[11px] font-semibold text-cyan-100 hover:bg-cyan-500/20"
+                      className="h-auto w-full justify-start rounded-xl border-cyan-400/50 bg-cyan-500/10 px-3 py-2 text-left text-[11px] font-semibold text-cyan-100 hover:bg-cyan-500/20"
                       onClick={() => setActiveLog(log)}
                     >
                       <div className="flex flex-col leading-tight">

@@ -18,3 +18,5 @@ weaviate-client==4.11.1
 langchain-mcp-adapters
 pytest>=7.4
 rapidfuzz
+fastmcp
+pymysql

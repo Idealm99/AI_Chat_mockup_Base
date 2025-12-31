@@ -1,9 +1,9 @@
 import { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
-import { Bot, ChevronDown, Loader2, Sparkles, User } from "lucide-react";
+import { Bot, ChevronDown, Loader2, Sparkles, User, Coins, Zap } from "lucide-react";
 import MarkdownRenderer from "./MarkdownRenderer";
 import { Button } from "@/components/ui/button";
-import type { ReasoningStep, DocumentReference } from "@/types/chat";
+import type { ReasoningStep, DocumentReference, UsageTotals } from "@/types/chat";
 
 interface ChatMessageProps {
   message: string;
@@ -12,8 +12,23 @@ interface ChatMessageProps {
   reasoningSteps?: ReasoningStep[];
   isThinking?: boolean;
   references?: DocumentReference[];
+  isSelected?: boolean;
+  onSelect?: () => void;
+  usage?: UsageTotals;
+  cost?: number;
 }
-const ChatMessage = ({ message, isUser, timestamp, reasoningSteps: _reasoningSteps = [], isThinking = false, references = [] }: ChatMessageProps) => {
+const ChatMessage = ({
+  message,
+  isUser,
+  timestamp,
+  reasoningSteps: _reasoningSteps = [],
+  isThinking = false,
+  references = [],
+  isSelected = false,
+  onSelect,
+  usage,
+  cost,
+}: ChatMessageProps) => {
   const [referenceOpenState, setReferenceOpenState] = useState<Record<number, boolean>>({});
   const [reasoningOpen, setReasoningOpen] = useState<boolean>(Boolean(isThinking));
 
@@ -35,10 +50,33 @@ const ChatMessage = ({ message, isUser, timestamp, reasoningSteps: _reasoningSte
   const alignment = isUser ? "justify-end" : "justify-start";
   const cardClasses = isUser
     ? "rounded-3xl border border-slate-800/80 bg-slate-900/80 px-5 py-4 text-slate-100 shadow-[0_18px_40px_-32px_rgba(59,130,246,0.5)]"
-    : "rounded-3xl border border-cyan-500/30 bg-gradient-to-br from-slate-900/80 via-slate-900/70 to-slate-900/40 px-6 py-5 text-slate-100 shadow-[0_30px_80px_-40px_rgba(6,182,212,0.55)] backdrop-blur-xl";
+    : cn(
+        "rounded-3xl border border-cyan-500/30 bg-gradient-to-br from-slate-900/80 via-slate-900/70 to-slate-900/40 px-6 py-5 text-slate-100 shadow-[0_30px_80px_-40px_rgba(6,182,212,0.55)] backdrop-blur-xl",
+        isSelected && "border-cyan-300/70 shadow-[0_30px_90px_-40px_rgba(59,130,246,0.75)]",
+      );
+  const selectable = !isUser && typeof onSelect === "function";
 
   return (
-    <div className={cn("flex w-full gap-4", alignment)}>
+    <div
+      className={cn(
+        "flex w-full gap-4",
+        alignment,
+        selectable && "cursor-pointer",
+      )}
+      onClick={() => {
+        if (selectable) {
+          onSelect?.();
+        }
+      }}
+      role={selectable ? "button" : undefined}
+      tabIndex={selectable ? 0 : undefined}
+      onKeyDown={(event) => {
+        if (selectable && (event.key === "Enter" || event.key === " ")) {
+          event.preventDefault();
+          onSelect?.();
+        }
+      }}
+    >
       {!isUser && (
         <div className="mt-1 flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full border border-cyan-500/40 bg-cyan-500/10 text-cyan-200 shadow-inner">
           <Bot className="h-5 w-5" />
@@ -89,7 +127,10 @@ const ChatMessage = ({ message, isUser, timestamp, reasoningSteps: _reasoningSte
                         variant="ghost"
                         size="sm"
                         className="h-8 rounded-full border border-slate-700/60 bg-slate-900/30 px-3 text-[11px] font-semibold text-slate-200"
-                        onClick={() => setReasoningOpen((prev) => !prev)}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setReasoningOpen((prev) => !prev);
+                        }}
                       >
                         {reasoningOpen ? "추론 축소" : "추론 펼치기"}
                         <ChevronDown
@@ -179,7 +220,10 @@ const ChatMessage = ({ message, isUser, timestamp, reasoningSteps: _reasoningSte
                                 variant="ghost"
                                 size="sm"
                                 className="h-7 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 text-[11px] font-semibold text-emerald-100"
-                                onClick={() => toggleReference(idx)}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  toggleReference(idx);
+                                }}
                               >
                                 {isExpanded ? "Close" : "Details"}
                                 <ChevronDown
@@ -200,6 +244,23 @@ const ChatMessage = ({ message, isUser, timestamp, reasoningSteps: _reasoningSte
                       );
                     })}
                   </div>
+                </div>
+              )}
+
+              {!isUser && (usage || cost !== undefined) && (
+                <div className="mt-4 flex items-center gap-4 border-t border-cyan-500/20 pt-3 text-[10px] font-medium tracking-wider text-cyan-400/70">
+                  {usage && (
+                    <div className="flex items-center gap-1.5">
+                      <Zap className="h-3 w-3" />
+                      <span>{usage.total_tokens?.toLocaleString()} TOKENS</span>
+                    </div>
+                  )}
+                  {cost !== undefined && (
+                    <div className="flex items-center gap-1.5">
+                      <Coins className="h-3 w-3" />
+                      <span>${cost.toFixed(6)}</span>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

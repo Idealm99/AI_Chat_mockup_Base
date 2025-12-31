@@ -12,10 +12,15 @@ import {
   Dna,
   Pill,
   MessageSquare,
+  Sparkles,
+  Radar,
+  GitBranch,
+  CalendarClock,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { getMcpStatus, McpServerStatus } from "@/lib/api";
+import { getPortalBaseUrl } from "@/lib/portal";
 
 const FALLBACK_AGENTS = [
   { name: "OpenTargets", status: "active", icon: Target },
@@ -39,12 +44,14 @@ const MCP_ICON_MAP: Record<string, LucideIcon> = {
   "Reactome-MCP-Server": Network,
   UniProt: Database,
   "UniProt-MCP-Server": Database,
+  "Augmented-Nature-UniProt-MCP-Server": Database,
   PubChem: Pill,
   "PubChem-MCP-Server": Pill,
   DrugBank: Pill,
   "DrugBank-MCP-Server": Pill,
   STRING: Network,
   "STRING-MCP-Server": Network,
+  "STRING-db-MCP-Server": Network,
   KEGG: Network,
   "KEGG-MCP-Server": Network,
   GeneOntology: Network,
@@ -55,6 +62,12 @@ const MCP_ICON_MAP: Record<string, LucideIcon> = {
   "OpenFDA-MCP-Server": FileText,
   PDB: Database,
   "PDB-MCP-Server": Database,
+  "NCBI-Datasets-MCP-Server": Database,
+  "OpenGenes-MCP-Server": Dna,
+  "BioThings-MCP-Server": Network,
+  "ProteinAtlas-MCP-Server": Database,
+  "Ensembl-MCP-Server": Dna,
+  "SureChEMBL-MCP-Server": Pill,
 };
 
 type DisplayAgent = {
@@ -81,6 +94,11 @@ const Dashboard = () => {
 
   const handleOpenWorkspace = () => {
     navigate("/chat");
+  };
+
+  const handlePortalNavigate = (path: string) => {
+    const base = getPortalBaseUrl();
+    window.location.href = `${base}${path}`;
   };
 
   const handleProjectClick = (projectId: string) => {
@@ -194,7 +212,12 @@ const Dashboard = () => {
           <span className="text-xl font-bold text-primary">JW</span>
         </div>
         <nav className="flex flex-col gap-4">
-          <Button variant="ghost" size="icon" className="text-primary hover:bg-primary/10">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="text-primary hover:bg-primary/10"
+            aria-label="Command Center Overview"
+          >
             <Activity className="h-5 w-5" />
           </Button>
           <Button
@@ -202,13 +225,50 @@ const Dashboard = () => {
             size="icon"
             className="text-muted-foreground hover:bg-muted/50 hover:text-primary"
             onClick={handleOpenWorkspace}
+            aria-label="JW Chat"
           >
             <MessageSquare className="h-5 w-5" />
           </Button>
-          <Button variant="ghost" size="icon" className="text-muted-foreground hover:bg-muted/50">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="text-muted-foreground hover:bg-muted/50"
+            onClick={() => handlePortalNavigate("/prompt-hub")}
+            aria-label="Prompt Hub"
+          >
+            <Sparkles className="h-5 w-5" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="text-muted-foreground hover:bg-muted/50"
+            onClick={() => handlePortalNavigate("/market-sensing")}
+            aria-label="Market Sensing"
+          >
+            <Radar className="h-5 w-5" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="text-muted-foreground hover:bg-muted/50"
+            onClick={() => handlePortalNavigate("/catalyst")}
+            aria-label="Correlation Analysis"
+          >
+            <GitBranch className="h-5 w-5" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="text-muted-foreground hover:bg-muted/50"
+            onClick={() => handlePortalNavigate("/event-analysis")}
+            aria-label="Event Hub"
+          >
+            <CalendarClock className="h-5 w-5" />
+          </Button>
+          <Button variant="ghost" size="icon" className="text-muted-foreground hover:bg-muted/50" aria-label="Data Catalog">
             <Database className="h-5 w-5" />
           </Button>
-          <Button variant="ghost" size="icon" className="text-muted-foreground hover:bg-muted/50">
+          <Button variant="ghost" size="icon" className="text-muted-foreground hover:bg-muted/50" aria-label="Reports">
             <FileText className="h-5 w-5" />
           </Button>
         </nav>

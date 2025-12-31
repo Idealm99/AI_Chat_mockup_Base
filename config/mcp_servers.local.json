@@ -1,56 +1,273 @@
 {
-  "defaults": {
-    "transport": "stdio",
-    "command": "node",
-    "args": [
-      "build/index.js"
-    ],
-    "env": {
-      "NODE_ENV": "production"
-    },
-    "encoding": "utf-8",
-    "encoding_error_handler": "strict"
-  },
+  "defaults": {},
   "servers": [
     {
       "name": "AlphaFold-MCP-Server",
-      "cwd": "../app/mcp/AlphaFold-MCP-Server"
+      "cwd": "../app/mcp/AlphaFold-MCP-Server",
+      "transport": "stdio",
+      "command": "node",
+      "args": [
+        "build/index.js"
+      ],
+      "env": {
+        "NODE_ENV": "production"
+      },
+      "encoding": "utf-8",
+      "encoding_error_handler": "strict"
     },
     {
       "name": "ChEMBL-MCP-Server",
-      "cwd": "../app/mcp/ChEMBL-MCP-Server"
+      "cwd": "../app/mcp/ChEMBL-MCP-Server",
+      "transport": "stdio",
+      "command": "node",
+      "args": [
+        "build/index.js"
+      ],
+      "env": {
+        "NODE_ENV": "production"
+      },
+      "encoding": "utf-8",
+      "encoding_error_handler": "strict"
     },
     {
       "name": "ClinicalTrials-MCP-Server",
-      "cwd": "../app/mcp/ClinicalTrials-MCP-Server"
+      "cwd": "../app/mcp/ClinicalTrials-MCP-Server",
+      "transport": "stdio",
+      "command": "node",
+      "args": [
+        "build/index.js"
+      ],
+      "env": {
+        "NODE_ENV": "production"
+      },
+      "encoding": "utf-8",
+      "encoding_error_handler": "strict"
     },
     {
       "name": "GeneOntology-MCP-Server",
-      "cwd": "../app/mcp/GeneOntology-MCP-Server"
+      "cwd": "../app/mcp/GeneOntology-MCP-Server",
+      "transport": "stdio",
+      "command": "node",
+      "args": [
+        "build/index.js"
+      ],
+      "env": {
+        "NODE_ENV": "production"
+      },
+      "encoding": "utf-8",
+      "encoding_error_handler": "strict"
     },
     {
       "name": "KEGG-MCP-Server",
-      "cwd": "../app/mcp/KEGG-MCP-Server"
+      "cwd": "../app/mcp/KEGG-MCP-Server",
+      "transport": "stdio",
+      "command": "node",
+      "args": [
+        "build/index.js"
+      ],
+      "env": {
+        "NODE_ENV": "production"
+      },
+      "encoding": "utf-8",
+      "encoding_error_handler": "strict"
     },
     {
       "name": "OpenFDA-MCP-Server",
-      "cwd": "../app/mcp/OpenFDA-MCP-Server"
+      "cwd": "../app/mcp/OpenFDA-MCP-Server",
+      "transport": "stdio",
+      "command": "node",
+      "args": [
+        "build/index.js"
+      ],
+      "env": {
+        "NODE_ENV": "production"
+      },
+      "encoding": "utf-8",
+      "encoding_error_handler": "strict"
     },
     {
       "name": "OpenTargets-MCP-Server",
-      "cwd": "../app/mcp/OpenTargets-MCP-Server"
+      "cwd": "../app/mcp/OpenTargets-MCP-Server",
+      "transport": "stdio",
+      "command": "node",
+      "args": [
+        "build/index.js"
+      ],
+      "env": {
+        "NODE_ENV": "production"
+      },
+      "encoding": "utf-8",
+      "encoding_error_handler": "strict"
     },
     {
       "name": "PDB-MCP-Server",
-      "cwd": "../app/mcp/PDB-MCP-Server"
+      "cwd": "../app/mcp/PDB-MCP-Server",
+      "transport": "stdio",
+      "command": "node",
+      "args": [
+        "build/index.js"
+      ],
+      "env": {
+        "NODE_ENV": "production"
+      },
+      "encoding": "utf-8",
+      "encoding_error_handler": "strict"
     },
     {
       "name": "Reactome-MCP-Server",
-      "cwd": "../app/mcp/Reactome-MCP-Server"
+      "cwd": "../app/mcp/Reactome-MCP-Server",
+      "transport": "stdio",
+      "command": "node",
+      "args": [
+        "build/index.js"
+      ],
+      "env": {
+        "NODE_ENV": "production"
+      },
+      "encoding": "utf-8",
+      "encoding_error_handler": "strict"
     },
-      {
-        "name": "PubChem-MCP-Server",
-        "cwd": "../app/mcp/PubChem-MCP-Server"
-      }
-    ]
+    {
+      "name": "PubChem-MCP-Server",
+      "cwd": "../app/mcp/PubChem-MCP-Server",
+      "transport": "stdio",
+      "command": "node",
+      "args": [
+        "build/index.js"
+      ],
+      "env": {
+        "NODE_ENV": "production"
+      },
+      "encoding": "utf-8",
+      "encoding_error_handler": "strict"
+    },
+    {
+      "name": "NCBI-Datasets-MCP-Server",
+      "cwd": "../app/mcp/NCBI-Datasets-MCP-Server",
+      "transport": "stdio",
+      "command": "node",
+      "args": [
+        "build/index.js"
+      ],
+      "env": {
+        "NODE_ENV": "production"
+      },
+      "encoding": "utf-8",
+      "encoding_error_handler": "strict"
+    },
+    {
+      "name": "Augmented-Nature-UniProt-MCP-Server",
+      "cwd": "../app/mcp/Augmented-Nature-UniProt-MCP-Server",
+      "transport": "stdio",
+      "command": "node",
+      "args": [
+        "build/index.js"
+      ],
+      "env": {
+        "NODE_ENV": "production"
+      },
+      "encoding": "utf-8",
+      "encoding_error_handler": "strict"
+    },
+    {
+      "name": "OpenGenes-MCP-Server",
+      "cwd": "../app/mcp/OpenGenes-MCP-Server",
+      "transport": "stdio",
+      "command": "node",
+      "args": [
+        "build/index.js"
+      ],
+      "env": {
+        "NODE_ENV": "production"
+      },
+      "encoding": "utf-8",
+      "encoding_error_handler": "strict"
+    },
+    {
+      "name": "BioThings-MCP-Server",
+      "cwd": "../app/mcp/BioThings-MCP-Server",
+      "transport": "stdio",
+      "command": "node",
+      "args": [
+        "build/index.js"
+      ],
+      "env": {
+        "NODE_ENV": "production"
+      },
+      "encoding": "utf-8",
+      "encoding_error_handler": "strict"
+    },
+    {
+      "name": "ProteinAtlas-MCP-Server",
+      "cwd": "../app/mcp/ProteinAtlas-MCP-Server",
+      "transport": "stdio",
+      "command": "node",
+      "args": [
+        "build/index.js"
+      ],
+      "env": {
+        "NODE_ENV": "production"
+      },
+      "encoding": "utf-8",
+      "encoding_error_handler": "strict"
+    },
+    {
+      "name": "Ensembl-MCP-Server",
+      "cwd": "../app/mcp/Ensembl-MCP-Server",
+      "transport": "stdio",
+      "command": "node",
+      "args": [
+        "build/index.js"
+      ],
+      "env": {
+        "NODE_ENV": "production"
+      },
+      "encoding": "utf-8",
+      "encoding_error_handler": "strict"
+    },
+    {
+      "name": "STRING-db-MCP-Server",
+      "cwd": "../app/mcp/STRING-db-MCP-Server",
+      "transport": "stdio",
+      "command": "node",
+      "args": [
+        "build/index.js"
+      ],
+      "env": {
+        "NODE_ENV": "production"
+      },
+      "encoding": "utf-8",
+      "encoding_error_handler": "strict"
+    },
+    {
+      "name": "SureChEMBL-MCP-Server",
+      "cwd": "../app/mcp/SureChEMBL-MCP-Server",
+      "transport": "stdio",
+      "command": "node",
+      "args": [
+        "build/index.js"
+      ],
+      "env": {
+        "NODE_ENV": "production"
+      },
+      "encoding": "utf-8",
+      "encoding_error_handler": "strict"
+    },
+    {
+      "name": "In-House-RAG-MCP-Server",
+      "cwd": "../app/mcp/In-House-RAG-MCP-Server",
+      "transport": "stdio",
+      "command": "python",
+      "args": [
+        "RAG-Server.py"
+      ],
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      },
+      "encoding": "utf-8",
+      "encoding_error_handler": "strict",
+      "description": "사내 RAG(검색 증강 생성) 지식 베이스 서버입니다. 내부 기술 문서 검색, 특정 학술 논문 조회, 그리고 논문 내의 도표(Chart)나 그림(Figure)을 검색하고 추출하는 기능을 제공합니다."
+    }
+  ]
 }
+

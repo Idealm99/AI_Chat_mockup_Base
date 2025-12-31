@@ -35,7 +35,7 @@ class States:
 def _get_genos_token() -> str:
     """GenOS 인증 토큰을 동기적으로 가져옵니다 (초기화용)"""
     import requests
-    base_url = os.getenv("GENOS_URL", "https://genos.mnc.ai:3443").rstrip("/")
+    base_url = os.getenv("GENOS_URL", "https://genos.genon.ai:3443").rstrip("/")
     response = requests.post(
         f"{base_url}/api/admin/auth/login",
         json={
@@ -49,7 +49,7 @@ def _get_genos_token() -> str:
 
 async def _get_genos_token_async() -> str:
     """GenOS 인증 토큰을 비동기적으로 가져옵니다"""
-    base_url = os.getenv("GENOS_URL", "https://genos.mnc.ai:3443").rstrip("/")
+    base_url = os.getenv("GENOS_URL", "https://genos.genon.ai:3443").rstrip("/")
     async with aiohttp.ClientSession() as session:
         async with session.post(
             f"{base_url}/api/admin/auth/login",
@@ -201,6 +201,8 @@ async def call_llm_stream(
 
     full_content_parts: list[str] = []
     tool_call_buf: dict[int, dict] = {}
+    total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    total_cost = 0.0  # OpenAI 직접 호출 시 비용 정보는 제공되지 않아 0으로 유지
     
     try:
         stream = await client.chat.completions.create(**stream_params)
@@ -253,8 +255,28 @@ async def call_llm_stream(
                             "event": "token",
                             "data": content_piece,
                         }
-        
+
+            # usage 정보 갱신 (스트림 마지막 chunk에 포함됨)
+            chunk_usage = getattr(chunk, "usage", None)
+            if chunk_usage:
+                if hasattr(chunk_usage, "model_dump"):
+                    usage_dict = chunk_usage.model_dump()
+                elif isinstance(chunk_usage, dict):
+                    usage_dict = chunk_usage
+                else:
+                    usage_dict = {
+                        "prompt_tokens": getattr(chunk_usage, "prompt_tokens", None),
+                        "completion_tokens": getattr(chunk_usage, "completion_tokens", None),
+                        "total_tokens": getattr(chunk_usage, "total_tokens", None),
+                    }
+                if isinstance(usage_dict, dict):
+                    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                        value = usage_dict.get(key)
+                        if isinstance(value, int):
+                            total_usage[key] = value
+
         # 최종 메시지 생성
+
         final_message: dict[str, Any] = {"role": "assistant"}
         final_content = "".join(full_content_parts).strip()
         final_message["content"] = final_content if final_content else ""
@@ -282,6 +304,9 @@ async def call_llm_stream(
                     },
                 })
             final_message["tool_calls"] = tool_calls
+
+        final_message["usage"] = total_usage
+        final_message["cost"] = total_cost
         
         yield final_message
         
@@ -394,7 +419,15 @@ async def _call_genos_llm_stream(
     
     full_content_parts: list[str] = []
     tool_call_buf: dict[int, dict] = {}
-    
+
+    # === usage/cost 누적용 변수 추가 ===
+    total_cost = 0.0
+    total_usage = {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+    }
+
     try:
         log.info(f"GenOS API 호출: {endpoint}")
         async with aiohttp.ClientSession() as session:
@@ -406,44 +439,59 @@ async def _call_genos_llm_stream(
                     log.error(f"사용된 토큰 (처음 20자): {bearer_token[:20]}...")
                     raise RuntimeError(f"GenOS API 인증 실패: {error_text}")
                 response.raise_for_status()
-                
+
                 buffer = ""
                 async for chunk in response.content.iter_any():
                     if not chunk:
                         continue
-                    
+
                     buffer += chunk.decode('utf-8', errors='ignore')
                     lines = buffer.split('\n')
                     buffer = lines.pop()  # 마지막 불완전한 줄은 버퍼에 보관
-                    
+
                     for line in lines:
                         line = line.strip()
                         if not line or line == 'data: [DONE]':
                             continue
-                        
+
                         if line.startswith('data: '):
                             json_str = line[6:]  # 'data: ' 제거
                             try:
                                 chunk_data = json.loads(json_str)
                             except json.JSONDecodeError:
                                 continue
-                            
+
+                            # === usage/cost 누적 ===
+                            # Alibaba MCP 서버 등에서 body 필드가 있을 수 있음
+                            body = chunk_data.get('body') or chunk_data
+                            usage = body.get('usage') if isinstance(body, dict) else None
+                            if usage:
+                                if "prompt_tokens" in usage:
+                                    total_usage["prompt_tokens"] = usage.get("prompt_tokens", total_usage["prompt_tokens"])
+                                if "completion_tokens" in usage:
+                                    total_usage["completion_tokens"] = usage.get("completion_tokens", total_usage["completion_tokens"])
+                                if "total_tokens" in usage:
+                                    total_usage["total_tokens"] = usage.get("total_tokens", total_usage["total_tokens"])
+                                cost_val = usage.get("cost")
+                                if isinstance(cost_val, (int, float)):
+                                    total_cost = float(cost_val)
+
                             if not chunk_data.get('choices'):
                                 continue
-                            
+
                             choice = chunk_data['choices'][0]
                             delta = choice.get('delta', {})
-                            
+
                             if not delta:
                                 continue
-                            
+
                             # tool calls 처리
                             if 'tool_calls' in delta and delta['tool_calls']:
                                 for tool_call_delta in delta['tool_calls']:
                                     idx = tool_call_delta.get('index')
                                     if idx is None:
                                         continue
-                                    
+
                                     if idx not in tool_call_buf:
                                         tool_call_buf[idx] = {
                                             "id": tool_call_delta.get('id', ''),
@@ -453,19 +501,19 @@ async def _call_genos_llm_stream(
                                                 "arguments": "",
                                             },
                                         }
-                                    
+
                                     buf = tool_call_buf[idx]
-                                    
+
                                     if 'id' in tool_call_delta:
                                         buf["id"] = tool_call_delta['id']
-                                    
+
                                     if 'function' in tool_call_delta:
                                         func_delta = tool_call_delta['function']
                                         if 'name' in func_delta:
                                             buf["function"]["name"] = func_delta['name']
                                         if 'arguments' in func_delta:
                                             buf["function"]["arguments"] += func_delta['arguments']
-                            
+
                             # content tokens 처리
                             if 'content' in delta and delta['content']:
                                 content_piece = delta['content']
@@ -477,12 +525,15 @@ async def _call_genos_llm_stream(
                                             "event": "token",
                                             "data": content_piece,
                                         }
-        
         # 최종 메시지 생성
         final_message: dict[str, Any] = {"role": "assistant"}
         final_content = "".join(full_content_parts).strip()
         final_message["content"] = final_content if final_content else ""
-        
+
+        # === 최종 usage/cost 정보 추가 ===
+        final_message["usage"] = total_usage
+        final_message["cost"] = total_cost
+
         # tool_calls가 있으면 추가
         if tool_call_buf:
             tool_calls = []
@@ -493,7 +544,7 @@ async def _call_genos_llm_stream(
                     args_str = tc["function"]["arguments"]
                 except (json.JSONDecodeError, TypeError):
                     args_str = "{}"
-                
+
                 tool_calls.append({
                     "id": tc["id"],
                     "type": tc["type"],
@@ -503,9 +554,9 @@ async def _call_genos_llm_stream(
                     },
                 })
             final_message["tool_calls"] = tool_calls
-        
+
         yield final_message
-        
+
     except Exception as e:
         log.exception("GenOS LLM API 호출 실패")
         raise

@@ -6,9 +6,10 @@ import { Send } from "lucide-react";
 interface ChatInputProps {
   onSendMessage: (message: string) => void;
   disabled?: boolean;
+  placeholder?: string;
 }
 
-const ChatInput = ({ onSendMessage, disabled }: ChatInputProps) => {
+const ChatInput = ({ onSendMessage, disabled, placeholder }: ChatInputProps) => {
   const [message, setMessage] = useState("");
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -29,13 +30,13 @@ const ChatInput = ({ onSendMessage, disabled }: ChatInputProps) => {
   return (
     <form
       onSubmit={handleSubmit}
-      className="relative mx-auto flex w-full max-w-5xl items-center rounded-[32px] border border-slate-800/70 bg-slate-950/60 px-5 py-4 shadow-[0_18px_60px_-45px_rgba(14,165,233,0.65)] backdrop-blur-xl"
+      className="relative mx-auto flex w-full max-w-5xl items-center rounded-[32px] border border-slate-800/70 bg-transparent px-5 py-4 shadow-none"
     >
       <Textarea
         value={message}
         onChange={(e) => setMessage(e.target.value)}
         onKeyDown={handleKeyDown}
-        placeholder="지금 분석하고 싶은 연구 주제를 입력하세요..."
+  placeholder={placeholder ?? "지금 분석하고 싶은 연구 주제를 입력하세요..."}
         disabled={disabled}
         className="mr-4 max-h-[240px] min-h-[64px] flex-1 resize-none border-none bg-transparent text-sm text-slate-200 placeholder:text-slate-500 focus-visible:ring-0"
         rows={1}

@@ -331,7 +331,7 @@ class ChEMBLServer {
                 },
                 {
                     name: 'get_target_compounds',
-                    description: 'Get compounds tested against a specific target',
+                    description: 'Get compounds tested against a specific target ',
                     inputSchema: {
                         type: 'object',
                         properties: {

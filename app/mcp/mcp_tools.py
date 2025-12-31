@@ -56,6 +56,7 @@ class MCPToolInfo:
 class LocalServerEntry:
     name: str
     display_name: str
+    description: str
     connection: Connection
     tool_allowlist: set[str]
     tool_blocklist: set[str]
@@ -104,6 +105,7 @@ def _build_connection(entry: Dict[str, Any], *, base_dir: Path) -> Connection:
         )
 
     connection: Connection = {"transport": transport}
+
     if transport == "stdio":
         command = entry.get("command")
         if not command:
@@ -133,7 +135,20 @@ def _build_connection(entry: Dict[str, Any], *, base_dir: Path) -> Connection:
     return connection
 
 
-def _merge_server_defaults(defaults: Dict[str, Any], server: Dict[str, Any]) -> Dict[str, Any]:
+def _merge_server_defaults(defaults: Dict[str, Any] | None, server: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply optional defaults onto a server config entry.
+
+    When the JSON already contains the resolved transport/command/etc. per entry,
+    the defaults block may be empty or omitted. In that case we simply return a
+    copy of the server definition without additional merging. This keeps the
+    loader compatible with both the legacy (defaults driven) and the new
+    fully-expanded config formats.
+    """
+
+    defaults = defaults or {}
+    if not defaults:
+        return dict(server)
+
     merged = dict(defaults)
     merged.update(server)
     for key in MERGEABLE_DICT_KEYS:
@@ -186,6 +201,7 @@ def _parse_local_server_config() -> List[LocalServerEntry]:
             LocalServerEntry(
                 name=name,
                 display_name=merged.get("display_name", name),
+                description=merged.get("description", ""),
                 connection=connection,
                 tool_allowlist=set(merged.get("tool_allowlist") or []),
                 tool_blocklist=set(merged.get("tool_blocklist") or []),
@@ -455,24 +471,56 @@ def get_mcp_tool_schema(tool_name: str) -> Dict[str, Any]:
     return info.schema
 
 
-def get_mcp_tools_schemas(tool_names: Iterable[str]) -> List[Dict[str, Any]]:
+def get_mcp_tools_schemas(tool_names: Iterable[str], filter_by_server: bool = False) -> List[Dict[str, Any]]:
+    """
+    Get MCP tool schemas.
+    
+    Args:
+        tool_names: List of tool names (or server names if filter_by_server=True)
+        filter_by_server: If True, tool_names are treated as MCP server names
+    
+    Returns:
+        List of tool schema dictionaries
+    """
     schemas: List[Dict[str, Any]] = []
-    for name in tool_names:
-        try:
-            canonical = _canonical_tool_name(name)
-        except ValueError:
-            continue
-        info = MCP_TOOL_REGISTRY[canonical]
-        schemas.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": info.name,
-                    "description": info.raw.get("description", ""),
-                    "parameters": info.schema,
-                },
-            }
-        )
+    
+    if filter_by_server:
+        # tool_names are MCP server names; get tools from those servers
+        target_servers = set(tool_names)
+        for canonical, info in MCP_TOOL_REGISTRY.items():
+            server_id = MCP_TOOL_NAME_TO_SERVER_ID.get(canonical)
+            # Extract server name from serving_id (e.g., "AlphaFold-MCP-Server" from "local:AlphaFold-MCP-Server")
+            if server_id:
+                server_name = server_id.split(":")[-1] if ":" in server_id else server_id
+                if server_name in target_servers:
+                    schemas.append(
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": info.name,
+                                "description": info.raw.get("description", ""),
+                                "parameters": info.schema,
+                            },
+                        }
+                    )
+    else:
+        # tool_names are specific tool names
+        for name in tool_names:
+            try:
+                canonical = _canonical_tool_name(name)
+            except ValueError:
+                continue
+            info = MCP_TOOL_REGISTRY[canonical]
+            schemas.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": info.name,
+                        "description": info.raw.get("description", ""),
+                        "parameters": info.schema,
+                    },
+                }
+            )
     return schemas
 
 
@@ -504,3 +552,4 @@ def get_mcp_tool(tool_name: str):
         return result
 
     return call_mcp_tool
+

@@ -19,7 +19,7 @@ const isValidTargetSearchArgs = (args: any): args is { query: string; size?: num
     args !== null &&
     typeof args.query === 'string' &&
     args.query.length > 0 &&
-    (args.size === undefined || (typeof args.size === 'number' && args.size > 0 && args.size <= 500)) &&
+    (args.size === undefined || (typeof args.size === 'number' && Number.isInteger(args.size) && args.size > 0 && args.size <= 500)) &&
     (args.format === undefined || ['json', 'tsv'].includes(args.format))
   );
 };
@@ -30,7 +30,7 @@ const isValidDiseaseSearchArgs = (args: any): args is { query: string; size?: nu
     args !== null &&
     typeof args.query === 'string' &&
     args.query.length > 0 &&
-    (args.size === undefined || (typeof args.size === 'number' && args.size > 0 && args.size <= 500)) &&
+    (args.size === undefined || (typeof args.size === 'number' && Number.isInteger(args.size) && args.size > 0 && args.size <= 500)) &&
     (args.format === undefined || ['json', 'tsv'].includes(args.format))
   );
 };
@@ -42,7 +42,7 @@ const isValidAssociationArgs = (args: any): args is { targetId?: string; disease
     (args.targetId === undefined || typeof args.targetId === 'string') &&
     (args.diseaseId === undefined || typeof args.diseaseId === 'string') &&
     (args.minScore === undefined || (typeof args.minScore === 'number' && args.minScore >= 0 && args.minScore <= 1)) &&
-    (args.size === undefined || (typeof args.size === 'number' && args.size > 0 && args.size <= 500)) &&
+    (args.size === undefined || (typeof args.size === 'number' && Number.isInteger(args.size) && args.size > 0 && args.size <= 500)) &&
     (args.targetId !== undefined || args.diseaseId !== undefined)
   );
 };
@@ -56,8 +56,34 @@ const isValidIdArgs = (args: any): args is { id: string } => {
   );
 };
 
+const normalizeArgs = (rawArgs: any, aliasMap: Record<string, string> = {}) => {
+  if (typeof rawArgs !== 'object' || rawArgs === null) {
+    return rawArgs;
+  }
+
+  const normalized: Record<string, any> = {};
+
+  for (const [key, value] of Object.entries(rawArgs)) {
+    normalized[key] = value;
+    const camelKey = key.includes('_')
+      ? key.replace(/_([a-zA-Z0-9])/g, (_, char: string) => char.toUpperCase())
+      : key;
+    if (!(camelKey in normalized)) {
+      normalized[camelKey] = value;
+    }
+  }
+
+  for (const [alias, canonical] of Object.entries(aliasMap)) {
+    if (alias in normalized && !(canonical in normalized)) {
+      normalized[canonical] = normalized[alias];
+    }
+  }
+
+  return normalized;
+};
+
 class OpenTargetsServer {
-  private server: Server;
+  private server: any;
   private apiClient: AxiosInstance;
   private graphqlClient: AxiosInstance;
 
@@ -214,10 +240,11 @@ class OpenTargetsServer {
             type: 'object',
             properties: {
               query: { type: 'string', description: 'Search query (gene symbol, name, description)' },
-              size: { type: 'number', description: 'Number of results to return (1-500, default: 25)', minimum: 1, maximum: 500 },
+              size: { type: 'integer', description: 'Number of results to return (1-500, default: 25)', minimum: 1, maximum: 500 },
               format: { type: 'string', enum: ['json', 'tsv'], description: 'Output format (default: json)' },
             },
             required: ['query'],
+            additionalProperties: false,
           },
         },
         {
@@ -227,10 +254,11 @@ class OpenTargetsServer {
             type: 'object',
             properties: {
               query: { type: 'string', description: 'Search query (disease name, synonym, description)' },
-              size: { type: 'number', description: 'Number of results to return (1-500, default: 25)', minimum: 1, maximum: 500 },
+              size: { type: 'integer', description: 'Number of results to return (1-500, default: 25)', minimum: 1, maximum: 500 },
               format: { type: 'string', enum: ['json', 'tsv'], description: 'Output format (default: json)' },
             },
             required: ['query'],
+            additionalProperties: false,
           },
         },
         {
@@ -242,9 +270,14 @@ class OpenTargetsServer {
               targetId: { type: 'string', description: 'Target Ensembl gene ID' },
               diseaseId: { type: 'string', description: 'Disease EFO ID' },
               minScore: { type: 'number', description: 'Minimum association score (0-1)', minimum: 0, maximum: 1 },
-              size: { type: 'number', description: 'Number of results to return (1-500, default: 25)', minimum: 1, maximum: 500 },
+              size: { type: 'integer', description: 'Number of results to return (1-500, default: 25)', minimum: 1, maximum: 500 },
             },
             required: [],
+            anyOf: [
+              { required: ['targetId'] },
+              { required: ['diseaseId'] },
+            ],
+            additionalProperties: false,
           },
         },
         {
@@ -255,9 +288,10 @@ class OpenTargetsServer {
             properties: {
               diseaseId: { type: 'string', description: 'Disease EFO ID' },
               minScore: { type: 'number', description: 'Minimum association score (0-1)', minimum: 0, maximum: 1 },
-              size: { type: 'number', description: 'Number of targets to return (1-500, default: 50)', minimum: 1, maximum: 500 },
+              size: { type: 'integer', description: 'Number of targets to return (1-500, default: 50)', minimum: 1, maximum: 500 },
             },
             required: ['diseaseId'],
+            additionalProperties: false,
           },
         },
         {
@@ -269,6 +303,7 @@ class OpenTargetsServer {
               id: { type: 'string', description: 'Target Ensembl gene ID' },
             },
             required: ['id'],
+            additionalProperties: false,
           },
         },
         {
@@ -280,6 +315,7 @@ class OpenTargetsServer {
               id: { type: 'string', description: 'Disease EFO ID' },
             },
             required: ['id'],
+            additionalProperties: false,
           },
         },
       ],
@@ -310,7 +346,9 @@ class OpenTargetsServer {
     });
   }
 
-  private async handleSearchTargets(args: any) {
+  private async handleSearchTargets(rawArgs: any) {
+    const args = normalizeArgs(rawArgs);
+
     if (!isValidTargetSearchArgs(args)) {
       throw new McpError(ErrorCode.InvalidParams, 'Invalid target search arguments');
     }
@@ -370,7 +408,9 @@ class OpenTargetsServer {
     }
   }
 
-  private async handleSearchDiseases(args: any) {
+  private async handleSearchDiseases(rawArgs: any) {
+    const args = normalizeArgs(rawArgs);
+
     if (!isValidDiseaseSearchArgs(args)) {
       throw new McpError(ErrorCode.InvalidParams, 'Invalid disease search arguments');
     }
@@ -430,7 +470,13 @@ class OpenTargetsServer {
     }
   }
 
-  private async handleGetTargetDiseaseAssociations(args: any) {
+  private async handleGetTargetDiseaseAssociations(rawArgs: any) {
+    const args = normalizeArgs(rawArgs, {
+      target_id: 'targetId',
+      disease_id: 'diseaseId',
+      min_score: 'minScore',
+    });
+
     if (!isValidAssociationArgs(args)) {
       throw new McpError(ErrorCode.InvalidParams, 'Invalid association arguments');
     }
@@ -507,14 +553,35 @@ class OpenTargetsServer {
     }
   }
 
-  private async handleGetDiseaseTargetsSummary(args: any) {
-    if (!isValidIdArgs(args) && !args.diseaseId) {
+  private async handleGetDiseaseTargetsSummary(rawArgs: any) {
+    const args = normalizeArgs(rawArgs, {
+      disease_id: 'diseaseId',
+      disease: 'diseaseId',
+      efo_id: 'diseaseId',
+      diseaseId: 'diseaseId',
+    }) as Record<string, any>;
+
+    if (args.diseaseId && !args.id) {
+      args.id = args.diseaseId;
+    }
+    if (!args.diseaseId && typeof args.id === 'string') {
+      args.diseaseId = args.id;
+    }
+
+    const diseaseId: string | undefined = typeof args.diseaseId === 'string' ? args.diseaseId : undefined;
+
+    const validationArgs = {
+      diseaseId,
+      targetId: undefined,
+      minScore: args.minScore,
+      size: args.size,
+    };
+
+    if (!diseaseId || !isValidAssociationArgs(validationArgs)) {
       throw new McpError(ErrorCode.InvalidParams, 'Disease ID is required');
     }
 
     try {
-      const diseaseId = args.diseaseId || args.id;
-
       const query = `query GetDiseaseTargetsSummary($efoId: String!) { disease(efoId: $efoId) { id name associatedTargets { count rows { target { id approvedSymbol approvedName } score } } } }`;
 
       const response = await this.graphqlClient.post('', {
@@ -563,7 +630,13 @@ class OpenTargetsServer {
     }
   }
 
-  private async handleGetTargetDetails(args: any) {
+  private async handleGetTargetDetails(rawArgs: any) {
+    const args = normalizeArgs(rawArgs, {
+      target_id: 'id',
+      targetId: 'id',
+      ensembl_id: 'id',
+    });
+
     if (!isValidIdArgs(args)) {
       throw new McpError(ErrorCode.InvalidParams, 'Target ID is required');
     }
@@ -599,7 +672,13 @@ class OpenTargetsServer {
     }
   }
 
-  private async handleGetDiseaseDetails(args: any) {
+  private async handleGetDiseaseDetails(rawArgs: any) {
+    const args = normalizeArgs(rawArgs, {
+      disease_id: 'id',
+      diseaseId: 'id',
+      efo_id: 'id',
+    });
+
     if (!isValidIdArgs(args)) {
       throw new McpError(ErrorCode.InvalidParams, 'Disease ID is required');
     }

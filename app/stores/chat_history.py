@@ -3,7 +3,7 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List, Union
+from typing import Optional, List, Union, Dict, Any
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 from app.logger import get_logger
 
@@ -29,6 +29,12 @@ class ChatHistoryStore:
             os.makedirs(db_dir, exist_ok=True)
         self._init_db()
     
+    def _ensure_column(self, cursor: sqlite3.Cursor, table: str, column: str, definition: str) -> None:
+        cursor.execute(f"PRAGMA table_info({table})")
+        columns = [row[1] for row in cursor.fetchall()]
+        if column not in columns:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
     def _init_db(self):
         """데이터베이스 초기화"""
         try:
@@ -58,6 +64,13 @@ class ChatHistoryStore:
                 )
             ''')
             
+            # 스키마 확장: metadata 및 usage 컬럼이 없으면 추가
+            self._ensure_column(cursor, "chat_messages", "metadata", "TEXT")
+            self._ensure_column(cursor, "chat_sessions", "prompt_tokens", "INTEGER DEFAULT 0")
+            self._ensure_column(cursor, "chat_sessions", "completion_tokens", "INTEGER DEFAULT 0")
+            self._ensure_column(cursor, "chat_sessions", "total_tokens", "INTEGER DEFAULT 0")
+            self._ensure_column(cursor, "chat_sessions", "cost", "REAL DEFAULT 0")
+
             # 인덱싱
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_chat_id ON chat_messages(chat_id)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_id ON chat_sessions(user_id)')
@@ -86,7 +99,7 @@ class ChatHistoryStore:
             offset = max(0, total_count - limit)
             
             cursor.execute('''
-                SELECT id, role, content, created_at
+                SELECT id, role, content, created_at, metadata
                 FROM chat_messages
                 WHERE chat_id = ?
                 ORDER BY id ASC
@@ -97,13 +110,21 @@ class ChatHistoryStore:
             rows = cursor.fetchall()
 
             for row in rows:
-                # row: id, role, content, created_at
-                _id, role, content, created_at = row
+                # row: id, role, content, created_at, metadata
+                _id, role, content, created_at, metadata_json = row
                 msg = {
                     "id": _id,
                     "role": role,
-                    "content": content
+                    "content": content,
+                    "created_at": created_at,
                 }
+                if metadata_json:
+                    try:
+                        msg["metadata"] = json.loads(metadata_json)
+                    except Exception:
+                        msg["metadata"] = {"raw": metadata_json}
+                else:
+                    msg["metadata"] = None
                 messages.append(msg)
             
             conn.close()
@@ -112,30 +133,69 @@ class ChatHistoryStore:
             log.error(f"Failed to get chat history: {e}")
             return []
     
-    async def save_message(self, chat_id: str, role: str, content: str) -> bool:
+    @staticmethod
+    def _generate_title(source: Optional[str], max_length: int = 60) -> Optional[str]:
+        if not source:
+            return None
+        cleaned = " ".join(source.strip().split())
+        if not cleaned:
+            return None
+        if len(cleaned) > max_length:
+            return cleaned[:max_length].rstrip() + "…"
+        return cleaned
+
+    async def save_message(
+        self,
+        chat_id: str,
+        role: str,
+        content: str,
+        *,
+        user_id: Optional[str] = None,
+        title: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         """메시지 저장"""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
             # 세션 존재 여부 확인, 없으면 생성
-            cursor.execute('SELECT chat_id FROM chat_sessions WHERE chat_id = ?', (chat_id,))
-            if not cursor.fetchone():
-                cursor.execute('''
-                    INSERT INTO chat_sessions (chat_id, created_at, updated_at)
-                    VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                ''', (chat_id,))
+            cursor.execute('SELECT user_id, title FROM chat_sessions WHERE chat_id = ?', (chat_id,))
+            row = cursor.fetchone()
+            title_candidate = title or (self._generate_title(content) if role == "user" else None)
+
+            if not row:
+                cursor.execute(
+                    '''
+                    INSERT INTO chat_sessions (chat_id, user_id, title, created_at, updated_at)
+                    VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    ''',
+                    (chat_id, user_id, title_candidate),
+                )
+            else:
+                existing_user_id, existing_title = row
+                set_clauses = []
+                params: List[Any] = []
+                if user_id and not existing_user_id:
+                    set_clauses.append("user_id = ?")
+                    params.append(user_id)
+                if title_candidate and not existing_title:
+                    set_clauses.append("title = ?")
+                    params.append(title_candidate)
+                set_clauses.append("updated_at = CURRENT_TIMESTAMP")
+                update_sql = f"UPDATE chat_sessions SET {', '.join(set_clauses)} WHERE chat_id = ?"
+                params.append(chat_id)
+                cursor.execute(update_sql, params)
             
             # 메시지 저장
-            cursor.execute('''
-                INSERT INTO chat_messages (chat_id, role, content)
-                VALUES (?, ?, ?)
-            ''', (chat_id, role, content))
-            
-            # 세션 업데이트 시간 갱신
-            cursor.execute('''
-                UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE chat_id = ?
-            ''', (chat_id,))
+            metadata_json = json.dumps(metadata, ensure_ascii=False) if metadata else None
+            cursor.execute(
+                '''
+                INSERT INTO chat_messages (chat_id, role, content, metadata)
+                VALUES (?, ?, ?, ?)
+                ''',
+                (chat_id, role, content, metadata_json),
+            )
             
             conn.commit()
             conn.close()
@@ -144,40 +204,129 @@ class ChatHistoryStore:
             log.error(f"Failed to save message: {e}")
             return False
     
-    async def save_messages(self, chat_id: str, messages: List[dict]) -> bool:
+    async def save_messages(
+        self,
+        chat_id: str,
+        messages: List[dict],
+        *,
+        user_id: Optional[str] = None,
+        title: Optional[str] = None,
+    ) -> bool:
         """여러 메시지 일괄 저장"""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
             # 세션 존재 여부 확인, 없으면 생성
-            cursor.execute('SELECT chat_id FROM chat_sessions WHERE chat_id = ?', (chat_id,))
-            if not cursor.fetchone():
-                cursor.execute('''
-                    INSERT INTO chat_sessions (chat_id, created_at, updated_at)
-                    VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                ''', (chat_id,))
+            cursor.execute('SELECT user_id, title FROM chat_sessions WHERE chat_id = ?', (chat_id,))
+            row = cursor.fetchone()
+            title_candidate = title
+            if not title_candidate:
+                for msg in messages:
+                    if msg.get('role') == 'user':
+                        title_candidate = self._generate_title(msg.get('content'))
+                        if title_candidate:
+                            break
+
+            if not row:
+                cursor.execute(
+                    '''
+                    INSERT INTO chat_sessions (chat_id, user_id, title, created_at, updated_at)
+                    VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    ''',
+                    (chat_id, user_id, title_candidate),
+                )
+            else:
+                existing_user_id, existing_title = row
+                set_clauses = []
+                params: List[Any] = []
+                if user_id and not existing_user_id:
+                    set_clauses.append("user_id = ?")
+                    params.append(user_id)
+                if title_candidate and not existing_title:
+                    set_clauses.append("title = ?")
+                    params.append(title_candidate)
+                set_clauses.append("updated_at = CURRENT_TIMESTAMP")
+                update_sql = f"UPDATE chat_sessions SET {', '.join(set_clauses)} WHERE chat_id = ?"
+                params.append(chat_id)
+                cursor.execute(update_sql, params)
             
             # 메시지 저장
             for msg in messages:
                 role = msg.get('role')
                 content = msg.get('content', '')
-                
-                cursor.execute('''
-                    INSERT INTO chat_messages (chat_id, role, content)
-                    VALUES (?, ?, ?)
-                ''', (chat_id, role, content))
-            
-            # 세션 업데이트 시간 갱신
-            cursor.execute('''
-                UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE chat_id = ?
-            ''', (chat_id,))
+                metadata_json = None
+                if 'metadata' in msg and msg['metadata'] is not None:
+                    try:
+                        metadata_json = json.dumps(msg['metadata'], ensure_ascii=False)
+                    except Exception:
+                        metadata_json = json.dumps({'fallback': str(msg['metadata'])}, ensure_ascii=False)
+
+                cursor.execute(
+                    '''
+                    INSERT INTO chat_messages (chat_id, role, content, metadata)
+                    VALUES (?, ?, ?, ?)
+                    ''',
+                    (chat_id, role, content, metadata_json),
+                )
             
             conn.commit()
             conn.close()
             return True
         except Exception as e:
             log.error(f"Failed to save messages: {e}")
+            return False
+
+    async def update_session_usage(
+        self,
+        chat_id: str,
+        usage: Optional[Dict[str, Any]] = None,
+        cost: Optional[float] = None,
+    ) -> bool:
+        """세션별 토큰/비용 누적 업데이트"""
+        try:
+            prompt_delta = int((usage or {}).get("prompt_tokens") or 0)
+            completion_delta = int((usage or {}).get("completion_tokens") or 0)
+            total_delta = int((usage or {}).get("total_tokens") or 0)
+            cost_delta = float(cost or 0)
+
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+
+            cursor.execute(
+                '''
+                UPDATE chat_sessions
+                SET prompt_tokens = prompt_tokens + ?,
+                    completion_tokens = completion_tokens + ?,
+                    total_tokens = total_tokens + ?,
+                    cost = cost + ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE chat_id = ?
+                ''',
+                (prompt_delta, completion_delta, total_delta, cost_delta, chat_id),
+            )
+
+            if cursor.rowcount == 0:
+                cursor.execute(
+                    '''
+                    INSERT INTO chat_sessions (
+                        chat_id,
+                        prompt_tokens,
+                        completion_tokens,
+                        total_tokens,
+                        cost,
+                        created_at,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    ''',
+                    (chat_id, prompt_delta, completion_delta, total_delta, cost_delta),
+                )
+
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            log.error(f"Failed to update session usage: {e}")
             return False
     
     async def clear_chat_history(self, chat_id: str) -> bool:
@@ -232,3 +381,42 @@ class ChatHistoryStore:
             else:
                 messages.append(BaseMessage(content=content, type=role))
         return messages
+
+    async def list_sessions(self, user_id: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+        """최근 채팅 세션 목록 조회"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            params: List[Any] = []
+            query = (
+                "SELECT chat_id, title, updated_at, prompt_tokens, completion_tokens, total_tokens, cost, "
+                "(SELECT content FROM chat_messages WHERE chat_id = chat_sessions.chat_id ORDER BY id DESC LIMIT 1) as last_message "
+                "FROM chat_sessions"
+            )
+            if user_id:
+                query += " WHERE user_id = ?"
+                params.append(user_id)
+            query += " ORDER BY updated_at DESC LIMIT ?"
+            params.append(limit)
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            conn.close()
+            sessions = []
+            for row in rows:
+                chat_id, title, updated_at, prompt_tokens, completion_tokens, total_tokens, cost, last_message = row
+                sessions.append(
+                    {
+                        "chat_id": chat_id,
+                        "title": title,
+                        "updated_at": updated_at,
+                        "prompt_tokens": prompt_tokens or 0,
+                        "completion_tokens": completion_tokens or 0,
+                        "total_tokens": total_tokens or 0,
+                        "cost": cost or 0.0,
+                        "last_message": last_message,
+                    }
+                )
+            return sessions
+        except Exception as e:
+            log.error(f"Failed to list chat sessions: {e}")
+            return []

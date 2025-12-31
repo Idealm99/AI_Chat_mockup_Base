@@ -6,9 +6,11 @@ import { Message } from "@/types/chat";
 interface ChatContainerProps {
   messages: Message[];
   isLoading?: boolean;
+  selectedMessageId?: string | null;
+  onSelectMessage?: (id: string) => void;
 }
 
-const ChatContainer = ({ messages, isLoading }: ChatContainerProps) => {
+const ChatContainer = ({ messages, isLoading, selectedMessageId, onSelectMessage }: ChatContainerProps) => {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -19,7 +21,7 @@ const ChatContainer = ({ messages, isLoading }: ChatContainerProps) => {
 
   return (
     <ScrollArea className="h-full">
-      <div ref={scrollRef} className="mx-auto flex h-full w-full max-w-5xl flex-col gap-6 pb-32">
+      <div ref={scrollRef} className="mx-auto flex h-full w-full max-w-5xl flex-col gap-6 pb-[50vh]">
         {isLoading && (
           <div className="flex justify-center pt-4">
             <div className="h-10 w-10 animate-spin rounded-full border-2 border-cyan-400/40 border-t-cyan-200" />
@@ -60,6 +62,14 @@ const ChatContainer = ({ messages, isLoading }: ChatContainerProps) => {
                 reasoningSteps={message.reasoningSteps}
                 isThinking={message.isThinking}
                 references={message.references}
+                usage={message.usage}
+                cost={message.cost}
+                isSelected={!message.isUser && selectedMessageId === message.id}
+                onSelect={
+                  !message.isUser && onSelectMessage
+                    ? () => onSelectMessage(message.id)
+                    : undefined
+                }
               />
             ))}
           </div>

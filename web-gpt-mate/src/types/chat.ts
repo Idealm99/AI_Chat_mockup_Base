@@ -5,11 +5,16 @@ export interface ToolLog {
   inputArgs?: unknown;
   outputResult?: unknown;
   outputPreview?: string;
+  outputText?: string;
   timestamp?: Date;
+  startedAt?: Date;
+  finishedAt?: Date;
   stageKey?: string;
   stageTitle?: string;
   serverName?: string;
   rawToolName?: string;
+  status?: "started" | "completed" | "error";
+  error?: string;
 }
 
 export interface ReasoningStep {
@@ -32,6 +37,10 @@ export interface Message {
   reasoningSteps?: ReasoningStep[];
   isThinking?: boolean;
   references?: DocumentReference[];
+  uiPayload?: UiPayload | null;
+  toolLogs?: ToolLog[];
+  usage?: UsageTotals;
+  cost?: number;
 }
 
 export interface DocumentReference {
@@ -108,4 +117,10 @@ export interface UiPayload {
   linkage?: LinkageInfo;
   report_cards?: ReportCard[];
   reportCards?: ReportCard[];
+}
+
+export interface UsageTotals {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
 }

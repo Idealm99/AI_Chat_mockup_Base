@@ -17,15 +17,32 @@ export interface ChatRequest {
   question: string;
   chatId?: string | null;
   userInfo?: UserInfo | null;
+  mode?: "research" | "orchestration";
+  targetServer?: string | null;
+  targetServers?: string[] | null;  // 여러 MCP 서버 목록
+  metadata?: Record<string, unknown> | null;
 }
 
 export interface ChatHistoryMessage extends UnknownRecord {
   role?: string;
   content?: string;
+  metadata?: Record<string, unknown> | null;
+  created_at?: string;
 }
 
 export interface ChatHistoryResponse {
   messages?: ChatHistoryMessage[];
+}
+
+export interface ChatSessionSummary {
+  chat_id: string;
+  title?: string | null;
+  last_message?: string | null;
+  updated_at?: string;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  cost?: number;
 }
 
 export interface McpServerStatus {
@@ -143,15 +160,31 @@ export async function* streamLangGraphChat(
   yield* streamSSE(`${API_BASE_URL}/chat/langgraph`, request, signal);
 }
 
+export async function* streamOrchestrationChat(
+  request: ChatRequest,
+  signal?: AbortSignal
+): AsyncGenerator<ChatStreamEvent, void, unknown> {
+  yield* streamSSE(`${API_BASE_URL}/orchestration/stream`, request, signal);
+}
+
 /**
  * 채팅 히스토리 조회 API
  */
-export async function getChatHistory(chatId: string): Promise<ChatHistoryResponse> {
-  const response = await fetch(`${API_BASE_URL}/chat/history/${chatId}`);
+export async function getChatHistory(chatId: string, limit = 50): Promise<ChatHistoryResponse> {
+  const response = await fetch(`${API_BASE_URL}/chat/history/${chatId}?limit=${limit}`);
   if (!response.ok) {
     throw new Error(`Failed to get chat history: ${response.status}`);
   }
   return response.json();
+}
+
+export async function getChatSessions(limit = 50): Promise<ChatSessionSummary[]> {
+  const response = await fetch(`${API_BASE_URL}/chat/sessions?limit=${limit}`);
+  if (!response.ok) {
+    throw new Error(`Failed to get chat sessions: ${response.status}`);
+  }
+  const data = await response.json();
+  return Array.isArray(data.sessions) ? data.sessions : [];
 }
 
 /**

@@ -72,6 +72,8 @@ class GraphState(TypedDict):
     next: str
     step_count: int
     rationale: str
+    final_usage: NotRequired[Dict[str, int]]
+    final_cost: NotRequired[float]
     _classify_is_mcp: NotRequired[bool]
     _classify_llm_result: NotRequired[str]
     _classify_keyword_match: NotRequired[bool]
@@ -1538,9 +1540,13 @@ class LangGraphSearchAgent:
             },
         )
 
-        final_message = await self._stream_answer(prompt_messages)
+        final_message, usage, cost = await self._stream_answer(prompt_messages)
         state["messages"] = [final_message]
         state["final_answer"] = final_message.content if isinstance(final_message.content, str) else str(final_message.content)
+        if usage:
+            state["final_usage"] = usage
+        if cost is not None:
+            state["final_cost"] = cost
         return state
 
     async def _final_answer_node(self, state: GraphState) -> GraphState:
@@ -1627,9 +1633,13 @@ class LangGraphSearchAgent:
             },
         )
 
-        final_message = await self._stream_answer(messages)
+        final_message, usage, cost = await self._stream_answer(messages)
         state["messages"] = [final_message]
         state["final_answer"] = final_message.content if isinstance(final_message.content, str) else str(final_message.content)
+        if usage:
+            state["final_usage"] = usage
+        if cost is not None:
+            state["final_cost"] = cost
         return state
 
     @staticmethod
@@ -1707,7 +1717,7 @@ class LangGraphSearchAgent:
         messages: List[BaseMessage],
         *,
         tools: Optional[List[Dict[str, Any]]] = None,
-    ) -> BaseMessage:
+    ) -> Tuple[AIMessage, Optional[Dict[str, int]], Optional[float]]:
         final_message: Optional[Dict[str, Any]] = None
         async for chunk in call_llm_stream(
             messages=messages,
@@ -1721,11 +1731,35 @@ class LangGraphSearchAgent:
                 final_message = chunk
         
         if final_message is None:
-            return AIMessage(content="")
+            return AIMessage(content=""), None, None
         
         content = final_message.get("content", "")
         tool_calls = final_message.get("tool_calls") or []
-        return AIMessage(content=content, tool_calls=tool_calls)
+        usage_payload: Optional[Dict[str, int]] = None
+        raw_usage = final_message.get("usage")
+        if isinstance(raw_usage, dict):
+            normalized_usage: Dict[str, int] = {}
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                value = raw_usage.get(key)
+                if isinstance(value, (int, float)):
+                    normalized_usage[key] = int(value)
+            if normalized_usage:
+                usage_payload = normalized_usage
+
+        cost_payload: Optional[float] = None
+        raw_cost = final_message.get("cost")
+        if isinstance(raw_cost, (int, float)):
+            cost_payload = float(raw_cost)
+
+        assistant_event: Dict[str, Any] = {}
+        if usage_payload:
+            assistant_event["usage"] = usage_payload
+        if cost_payload is not None:
+            assistant_event["cost"] = cost_payload
+        if assistant_event:
+            await self._emit("assistant", assistant_event)
+
+        return AIMessage(content=content, tool_calls=tool_calls if tool_calls else []), usage_payload, cost_payload
 
     async def _simple_llm_call(
         self,
